@@ -10,8 +10,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT_DIR, "public");
-const BASE_ENV_PATH = path.join(ROOT_DIR, ".env");
-const SESSION_ENV_PATH = path.join(ROOT_DIR, ".env.session");
+
+function argValue(name) {
+  const index = process.argv.indexOf(name);
+  if (index < 0 || index + 1 >= process.argv.length) return "";
+  return process.argv[index + 1];
+}
+
+const BASE_ENV_PATH = path.resolve(argValue("--base-env") || path.join(ROOT_DIR, ".env"));
+const SESSION_ENV_PATH = path.resolve(argValue("--session-env") || path.join(ROOT_DIR, ".env.session"));
 const LIVE_UNLOCK_PHRASE = "I_ACCEPT_LIVE_RISK";
 const MAX_BODY_BYTES = 1024 * 1024;
 
