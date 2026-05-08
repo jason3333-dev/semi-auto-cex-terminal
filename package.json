@@ -1,0 +1,14 @@
+{
+  "name": "semi-auto-cex-terminal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check src/server.js && node --check src/account-stream-normalizers.js && node --check src/exchanges/binance-usdm.js && node --check src/exchanges/mememax-orderly.js && node --check src/exchanges/registry.js && node --check src/exchanges/types.js && node --check public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
