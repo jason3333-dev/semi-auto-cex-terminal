@@ -71,7 +71,9 @@ const app = {
   accountRefreshDelayTimer: null,
   accountRefreshInFlight: false,
   priceTimer: null,
-  chartPointer: null
+  chartPointer: null,
+  symbolApplyTimer: null,
+  marketRequestSeq: 0
 };
 
 async function request(path, options = {}) {
@@ -135,6 +137,14 @@ function escapeHtml(value) {
 
 function currentSymbol() {
   return app.activeSymbol || "BTCUSDC";
+}
+
+function normalizedSymbolInput() {
+  return ui.symbolInput.value.trim().toUpperCase();
+}
+
+function isKnownSymbol(symbol) {
+  return app.symbols.some((item) => item.symbol === symbol);
 }
 
 function apiSideForIntent(action, intent) {
@@ -461,12 +471,14 @@ async function loadMarket() {
   const symbol = currentSymbol();
   const interval = ui.intervalSelect.value;
   const limit = chartLimit();
+  const requestSeq = ++app.marketRequestSeq;
   await post("/api/market/focus", { symbol, interval }).catch(() => null);
   const [price, klinesPayload, bookPayload] = await Promise.all([
     request(`/api/market/price?symbol=${encodeURIComponent(symbol)}`),
     request(`/api/market/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`),
     request(`/api/market/orderbook?symbol=${encodeURIComponent(symbol)}&limit=20`)
   ]);
+  if (requestSeq !== app.marketRequestSeq || symbol !== currentSymbol()) return;
   app.klines = klinesPayload.klines;
   app.orderBook = bookPayload.orderBook;
   app.lastPriceValue = Number(price.price);
@@ -482,8 +494,10 @@ async function loadMarket() {
 }
 
 async function loadPriceTick() {
+  const symbol = currentSymbol();
   try {
-    const price = await request(`/api/market/price?symbol=${encodeURIComponent(currentSymbol())}`);
+    const price = await request(`/api/market/price?symbol=${encodeURIComponent(symbol)}`);
+    if (symbol !== currentSymbol()) return;
     app.lastPriceValue = Number(price.price);
     ui.lastPrice.textContent = formatPrice(price.price);
     ui.limitMetaLabel.textContent = `Last ${formatPrice(price.price)}`;
@@ -998,10 +1012,47 @@ function setReferenceLimitPrice() {
   if (bookPrice) ui.limitPriceInput.value = bookPrice;
 }
 
+async function applySymbolChange() {
+  const typed = normalizedSymbolInput();
+  if (!typed || !isKnownSymbol(typed) || typed === app.activeSymbol) return false;
+
+  app.activeSymbol = typed;
+  app.marketRequestSeq += 1;
+  ui.symbolInput.value = app.activeSymbol;
+  ui.limitPriceInput.value = "";
+  app.positions = [];
+  app.klines = [];
+  app.orderBook = null;
+  app.chartPointer = null;
+  drawChart();
+  syncCloseQuantityFromPositions();
+  await loadLeverageBracket();
+  scheduleLeverageApply();
+  await refreshAll();
+  return true;
+}
+
+function scheduleSymbolApply() {
+  window.clearTimeout(app.symbolApplyTimer);
+  const typed = normalizedSymbolInput();
+  if (!isKnownSymbol(typed) || typed === app.activeSymbol) return;
+  app.symbolApplyTimer = window.setTimeout(() => {
+    applySymbolChange().catch((error) => toast(error.message, true));
+  }, 180);
+}
+
 function bindEvents() {
   ui.refreshButton.addEventListener("click", refreshAll);
   ui.symbolInput.addEventListener("input", () => {
-    ui.symbolInput.value = ui.symbolInput.value.toUpperCase();
+    ui.symbolInput.value = normalizedSymbolInput();
+    scheduleSymbolApply();
+  });
+  ui.symbolInput.addEventListener("keydown", async (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    window.clearTimeout(app.symbolApplyTimer);
+    if (await applySymbolChange()) return;
+    ui.symbolInput.dispatchEvent(new Event("change"));
   });
   ui.symbolInput.addEventListener("change", async () => {
     const typed = ui.symbolInput.value.trim().toUpperCase();
