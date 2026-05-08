@@ -1,4 +1,4 @@
-# Retail Portable Package
+# MemeMax Orderly Retail Portable Package
 
 Build the Windows portable package:
 
@@ -17,7 +17,7 @@ The package bundles:
 
 - `SemiAutoCexTerminal.exe`
 - `runtime\node.exe`
-- app files under `app\`
+- MemeMax Orderly app files under `app\`
 - `README.txt`
 
 Retail session settings are created and read from:
@@ -26,5 +26,5 @@ Retail session settings are created and read from:
 %LOCALAPPDATA%\SemiAutoCexTerminal\.env.session
 ```
 
-First launch copies the dry-run template from `app\.env.session.example`.
+First launch copies the MemeMax dry-run template from `app\.env.session.example`.
 No live credentials, local `.env.session`, logs, debug images, or `dist` artifacts are included in the ZIP.

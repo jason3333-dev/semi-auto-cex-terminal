@@ -27,8 +27,8 @@ internal static class SemiAutoCexTerminalLauncher
 
     private static int Run()
     {
-        Console.Title = "Semi-Auto CEX Terminal";
-        Console.WriteLine("Semi-Auto CEX Terminal launcher");
+        Console.Title = "MemeMax Orderly Terminal";
+        Console.WriteLine("MemeMax Orderly Terminal launcher");
 
         string appRoot = ResolveAppRoot();
         if (appRoot == null)

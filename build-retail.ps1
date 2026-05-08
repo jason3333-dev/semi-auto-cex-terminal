@@ -51,8 +51,8 @@ Copy-Item -LiteralPath (Join-Path $Root ".env.session.example") -Destination $ap
 Copy-Item -LiteralPath (Join-Path $Root "README.md") -Destination $appDir
 
 $readme = @"
-Semi-Auto CEX Terminal
-======================
+MemeMax Orderly Semi-Auto Terminal
+==================================
 
 1. Run SemiAutoCexTerminal.exe.
 2. The local server starts only while this launcher window is open.
@@ -62,6 +62,7 @@ Semi-Auto CEX Terminal
 5. First launch creates a dry-run template. Edit that file, then restart.
 
 Safety defaults:
+- SESSION_EXCHANGE_ID=mememax-orderly
 - TRADING_MODE=dry-run
 - No API credentials are bundled.
 - This package does not include .env.session, logs, debug images, or build artifacts.

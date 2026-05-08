@@ -128,7 +128,7 @@ const CHART_VWAP_ENABLED = envBoolean("CHART_VWAP_ENABLED", true);
 const CHART_VWAP_PERIOD = Math.max(1, Math.min(500, envNumber("CHART_VWAP_PERIOD", 80)));
 
 const state = {
-  exchangeId: process.env.SESSION_EXCHANGE_ID || process.env.EXCHANGE_ID || "binance-usdm",
+  exchangeId: process.env.SESSION_EXCHANGE_ID || process.env.EXCHANGE_ID || "mememax-orderly",
   mode: process.env.TRADING_MODE || "dry-run",
   credentialsByExchange: {
     "binance-usdm": {
@@ -274,7 +274,7 @@ if (!["dry-run", "testnet", "live"].includes(state.mode)) {
 try {
   getExchange(state.exchangeId);
 } catch {
-  state.exchangeId = "binance-usdm";
+  state.exchangeId = "mememax-orderly";
 }
 if (state.mode === "live" && !state.liveUnlocked) {
   state.mode = "dry-run";
@@ -1894,7 +1894,7 @@ const server = http.createServer(handle);
 logEnvFileDetection();
 
 server.listen(PORT, "127.0.0.1", () => {
-  log("info", `Semi-auto CEX terminal listening on http://127.0.0.1:${PORT}`, {
+  log("info", `MemeMax Orderly terminal listening on http://127.0.0.1:${PORT}`, {
     mode: state.mode,
     exchangeId: state.exchangeId,
     hasApiKey: hasActiveApiKey()

@@ -1,204 +1,207 @@
 <!doctype html>
 <html lang="ko">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Semi-Auto CEX Terminal</title>
-    <link rel="stylesheet" href="/styles.css">
-  </head>
-  <body>
-    <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <h1>Semi-Auto CEX Terminal</h1>
-          <div class="status-line">
-            <span id="modeBadge" class="badge badge-muted">DRY-RUN</span>
-            <span id="connectionLabel">연결 대기</span>
-          </div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MemeMax Orderly Terminal</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>MemeMax Orderly Terminal</h1>
+        <div class="status-line">
+          <span id="modeBadge" class="badge badge-muted">DRY-RUN</span>
+          <span id="connectionLabel">연결 대기</span>
         </div>
-        <div class="topbar-actions">
-          <button id="refreshButton" class="icon-button" title="새로고침" aria-label="새로고침">R</button>
-        </div>
-      </header>
+      </div>
+      <div class="topbar-actions">
+        <button id="refreshButton" class="icon-button" type="button" title="새로고침" aria-label="새로고침">R</button>
+      </div>
+    </header>
 
-      <main class="terminal-grid">
-        <section class="market-panel">
-          <div class="panel-head">
-            <div class="symbol-row">
-              <input id="symbolInput" list="symbolOptions" aria-label="티커 검색" autocomplete="off" spellcheck="false">
-              <datalist id="symbolOptions"></datalist>
-              <select id="intervalSelect" aria-label="차트 주기">
-                <option value="15s" selected>15s</option>
-                <option value="1m">1m</option>
-                <option value="5m">5m</option>
-                <option value="15m">15m</option>
-                <option value="1h">1h</option>
-                <option value="4h">4h</option>
-              </select>
+    <main class="terminal-grid">
+      <section class="market-panel">
+        <div class="panel-head">
+          <div class="symbol-row">
+            <input id="symbolInput" list="symbolOptions" aria-label="티커 검색" autocomplete="off" spellcheck="false">
+            <datalist id="symbolOptions"></datalist>
+            <select id="intervalSelect" aria-label="차트 주기">
+              <option value="15s" selected>15s</option>
+              <option value="1m">1m</option>
+              <option value="5m">5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+              <option value="4h">4h</option>
+            </select>
+          </div>
+          <div class="ticker-strip">
+            <div>
+              <span class="label">Last</span>
+              <strong id="lastPrice">-</strong>
             </div>
-            <div class="ticker-strip">
-              <div>
-                <span class="label">Last</span>
-                <strong id="lastPrice">-</strong>
-              </div>
-              <div>
-                <span class="label">Bid</span>
-                <strong id="bestBid">-</strong>
-              </div>
-              <div>
-                <span class="label">Ask</span>
-                <strong id="bestAsk">-</strong>
-              </div>
-              <div>
-                <span class="label">Balance</span>
-                <strong id="accountBalance">-</strong>
-              </div>
-              <div>
-                <span class="label">Session PnL</span>
-                <strong id="sessionPnl">-</strong>
-              </div>
+            <div>
+              <span class="label">Bid</span>
+              <strong id="bestBid">-</strong>
+            </div>
+            <div>
+              <span class="label">Ask</span>
+              <strong id="bestAsk">-</strong>
+            </div>
+            <div>
+              <span class="label">Balance</span>
+              <strong id="accountBalance">-</strong>
+            </div>
+            <div>
+              <span class="label">Session PnL</span>
+              <strong id="sessionPnl">-</strong>
             </div>
           </div>
-          <div class="chart-wrap">
-            <canvas id="priceChart" width="1100" height="560" aria-label="캔들 차트"></canvas>
-            <div id="crosshairReadout" class="crosshair-readout"></div>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="priceChart" aria-label="캔들 차트"></canvas>
+          <div id="crosshairReadout" class="crosshair-readout">C -</div>
+        </div>
+      </section>
+
+      <aside class="control-panel">
+        <section class="control-section">
+          <h2>주문</h2>
+          <div class="segmented" role="group" aria-label="주문 방향">
+            <button id="openAction" class="segment active" type="button" data-action="OPEN">OPEN</button>
+            <button id="closeAction" class="segment" type="button" data-action="CLOSE">CLOSE</button>
           </div>
+          <div class="segmented" role="group" aria-label="포지션 방향">
+            <button id="longIntent" class="segment active" type="button" data-intent="LONG">LONG</button>
+            <button id="shortIntent" class="segment" type="button" data-intent="SHORT">SHORT</button>
+          </div>
+          <label class="leverage-control">
+            <span>
+              <span>Leverage</span>
+              <strong id="leverageValue">5x</strong>
+              <em id="leverageMaxLabel">max 125x</em>
+            </span>
+            <input id="leverageInput" type="range" min="1" max="125" step="1" value="5">
+          </label>
+          <div class="input-grid tight-grid">
+            <label>
+              <span>Qty <span id="positionSizeLabel" class="field-meta">Size - · Liq -</span></span>
+              <input id="quantityInput" type="number" min="0" step="0.000001" value="0.001" inputmode="decimal">
+            </label>
+            <label>
+              <span>Limit <span id="limitMetaLabel" class="field-meta">Last -</span></span>
+              <input id="limitPriceInput" type="number" min="0" step="0.0001" inputmode="decimal">
+            </label>
+          </div>
+          <div class="risk-grid">
+            <label>
+              <span class="switch-row">
+                <input id="stopLossEnabledInput" type="checkbox">
+                Stop Loss
+              </span>
+              <input id="stopLossAmountInput" type="number" min="0" step="0.01" placeholder="USDC" inputmode="decimal" disabled>
+            </label>
+            <label>
+              <span class="switch-row">
+                <input id="takeProfitEnabledInput" type="checkbox">
+                Take Profit
+              </span>
+              <input id="takeProfitAmountInput" type="number" min="0" step="0.01" placeholder="USDC" inputmode="decimal" disabled>
+            </label>
+          </div>
+          <div class="order-mode-row">
+            <label class="checkbox-label">
+              <input id="autoChaseInput" type="checkbox">
+              Auto chase
+            </label>
+            <label class="checkbox-label fast-label">
+              <input id="fastModeInput" type="checkbox">
+              FAST
+            </label>
+          </div>
+          <div id="chaseSummary" class="order-summary">-</div>
+          <button id="limitOrderButton" class="primary" type="button">지정가 주문</button>
+          <button id="stopChaseButton" type="button">추격 주문 중지</button>
         </section>
 
-        <aside class="control-panel">
-          <section class="control-section">
-            <h2>주문</h2>
-            <div class="segmented" role="group" aria-label="주문 액션">
-              <button id="openAction" class="segment active" data-action="OPEN">OPEN</button>
-              <button id="closeAction" class="segment" data-action="CLOSE">CLOSE</button>
-            </div>
-            <div class="segmented" role="group" aria-label="포지션 방향">
-              <button id="longIntent" class="segment active" data-intent="LONG">LONG</button>
-              <button id="shortIntent" class="segment" data-intent="SHORT">SHORT</button>
-            </div>
-            <label class="leverage-control">
-              <span>
-                Leverage
-                <strong id="leverageValue">5x</strong>
-                <em id="leverageMaxLabel">max 125x</em>
-              </span>
-              <input id="leverageInput" type="range" min="1" max="125" step="1" value="5">
-            </label>
-            <div class="input-grid tight-grid">
-              <label>
-                Qty
-                <span id="positionSizeLabel" class="field-meta">Size -</span>
-                <input id="quantityInput" type="number" min="0" step="0.001" value="0.001">
-              </label>
-              <label>
-                Limit
-                <span id="limitMetaLabel" class="field-meta">Last -</span>
-                <input id="limitPriceInput" type="number" min="0" step="0.1">
-              </label>
-            </div>
-            <div class="risk-grid">
-              <label>
-                <span class="switch-row">
-                  <input id="stopLossEnabledInput" type="checkbox">
-                  Stop Loss
-                </span>
-                <input id="stopLossAmountInput" type="number" min="0" step="1" placeholder="USDC" disabled>
-              </label>
-              <label>
-                <span class="switch-row">
-                  <input id="takeProfitEnabledInput" type="checkbox">
-                  Take Profit
-                </span>
-                <input id="takeProfitAmountInput" type="number" min="0" step="1" placeholder="USDC" disabled>
-              </label>
-            </div>
-            <div class="order-mode-row">
-              <label class="checkbox-label">
-                <input id="autoChaseInput" type="checkbox">
-                Auto chase
-              </label>
-              <label class="checkbox-label fast-label">
-                <input id="fastModeInput" type="checkbox">
-                FAST
-              </label>
-            </div>
-            <div id="chaseSummary" class="order-summary"></div>
-            <button id="limitOrderButton" class="primary">지정가 주문</button>
-            <button id="stopChaseButton">추격 주문 중지</button>
-          </section>
+        <section class="control-section danger-zone">
+          <h2>긴급 정리</h2>
+          <button id="reverseButton" class="reverse-button" type="button">리버스</button>
+          <label class="checkbox-label">
+            <input id="closeAllInput" type="checkbox">
+            전체 심볼
+          </label>
+          <button id="cancelAllButton" type="button">오픈오더 취소</button>
+          <button id="emergencyButton" class="danger" type="button">포지션 정리</button>
+        </section>
+      </aside>
 
-          <section class="control-section danger-zone">
-            <h2>긴급 정리</h2>
-            <label class="checkbox-label">
-              <input id="closeAllInput" type="checkbox">
-              전체 심볼
-            </label>
-            <button id="cancelAllButton">오픈오더 취소</button>
-            <button id="reverseButton" class="reverse-button">리버스</button>
-            <button id="emergencyButton" class="danger">포지션 정리</button>
-          </section>
-        </aside>
+      <section class="table-panel positions-panel">
+        <div class="panel-head compact">
+          <h2>포지션</h2>
+          <button id="positionsRefresh" class="small-button" type="button">갱신</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Qty</th>
+                <th>Entry</th>
+                <th>Mark</th>
+                <th>PnL</th>
+                <th>Liq</th>
+              </tr>
+            </thead>
+            <tbody id="positionsBody">
+              <tr><td colspan="7" class="muted-cell">포지션 없음</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
 
-        <section class="table-panel positions-panel">
-          <div class="panel-head compact">
-            <h2>포지션</h2>
-            <button id="positionsRefresh" class="small-button">갱신</button>
-          </div>
+      <section class="table-panel orders-panel">
+        <div class="panel-head compact">
+          <h2>오픈 오더 / 추격 주문</h2>
+          <button id="ordersRefresh" class="small-button" type="button">갱신</button>
+        </div>
+        <div class="split-table">
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Symbol</th>
+                  <th>Action</th>
                   <th>Side</th>
+                  <th>Type</th>
                   <th>Qty</th>
-                  <th>Entry</th>
-                  <th>Mark</th>
-                  <th>PNL</th>
-                  <th>Liq</th>
+                  <th>Price</th>
+                  <th>Status</th>
                 </tr>
               </thead>
-              <tbody id="positionsBody"></tbody>
+              <tbody id="ordersBody">
+                <tr><td colspan="7" class="muted-cell">오픈 오더 없음</td></tr>
+              </tbody>
             </table>
           </div>
-        </section>
-
-        <section class="table-panel orders-panel">
-          <div class="panel-head compact">
-            <h2>오픈 오더 / 추격 주문</h2>
-            <button id="ordersRefresh" class="small-button">갱신</button>
+          <div id="jobsList" class="jobs-list">
+            <div class="job-item"><span class="job-meta">추격 지정가 작업 없음</span></div>
           </div>
-          <div class="split-table">
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Symbol</th>
-                    <th>Action</th>
-                    <th>Position</th>
-                    <th>Type</th>
-                    <th>Qty</th>
-                    <th>Price</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody id="ordersBody"></tbody>
-              </table>
-            </div>
-            <div class="jobs-list" id="jobsList"></div>
-          </div>
-        </section>
+        </div>
+      </section>
 
-        <section class="log-panel">
-          <div class="panel-head compact">
-            <h2>터미널 로그</h2>
-            <span id="lastUpdated">-</span>
-          </div>
-          <div id="logOutput" class="log-output"></div>
-        </section>
-      </main>
-    </div>
-
-    <div id="toast" class="toast hidden"></div>
-    <script type="module" src="/app.js"></script>
-  </body>
+      <section class="log-panel">
+        <div class="panel-head compact">
+          <h2>터미널 로그</h2>
+          <span id="lastUpdated" class="label">-</span>
+        </div>
+        <div id="logOutput" class="log-output"></div>
+      </section>
+    </main>
+  </div>
+  <div id="toast" class="toast hidden"></div>
+</body>
 </html>
