@@ -4,7 +4,7 @@ MemeMax Orderly perps를 기준으로 만든 로컬 반자동 트레이딩 터�
 
 ## 주요 기능
 
-- MemeMax Orderly perp 심볼 검색과 TradingView Lightweight Charts 기반 15초 기본 차트
+- MemeMax Orderly perp 심볼 검색과 TradingView Lightweight Charts 기반 15초 기본 차트, 볼륨 표시
 - Orderly public WebSocket 기반 가격, 오더북, ticker, trade, kline 구독
 - 티커 변경 시 이전 market stream 구독 정리
 - OPEN/CLOSE, LONG/SHORT, 레버리지 슬라이더, 수량/지정가 입력

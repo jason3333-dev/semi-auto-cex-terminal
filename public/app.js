@@ -9,6 +9,8 @@ const CHART_DOWN_COLOR = "#ff5c5c";
 const CHART_VWAP_COLOR = "rgba(255, 210, 114, 0.82)";
 const CHART_CHANNEL_COLOR = "rgba(90, 167, 255, 0.58)";
 const CHART_CHANNEL_MID_COLOR = "rgba(232, 184, 74, 0.52)";
+const CHART_VOLUME_UP_COLOR = "rgba(32, 191, 116, 0.24)";
+const CHART_VOLUME_DOWN_COLOR = "rgba(255, 92, 92, 0.24)";
 
 const ui = {
   modeBadge: $("#modeBadge"),
@@ -83,6 +85,7 @@ const app = {
   priceTimer: null,
   chartApi: null,
   candleSeries: null,
+  volumeSeries: null,
   vwapSeries: null,
   channelSeries: [],
   resizeObserver: null,
@@ -378,7 +381,7 @@ function updateLiveFifteenSecondCandle(price) {
 }
 
 function chartLimit() {
-  return ui.intervalSelect.value === "15s" ? 80 : 180;
+  return (ui.intervalSelect.value || "15s") === "15s" ? 240 : 180;
 }
 
 function typicalPrice(row) {
@@ -823,6 +826,14 @@ function lineData(rows, values) {
     .filter((row) => Number.isFinite(row.value));
 }
 
+function volumeData(rows) {
+  return rows.map((row) => ({
+    time: row.time,
+    value: Math.max(0, Number(row.volume || 0)),
+    color: row.close >= row.open ? CHART_VOLUME_UP_COLOR : CHART_VOLUME_DOWN_COLOR
+  }));
+}
+
 function createSeries(seriesType, options, legacyMethod) {
   if (!app.chartApi) return null;
   if (typeof app.chartApi.addSeries === "function" && seriesType) {
@@ -889,7 +900,7 @@ function initChart() {
     },
     rightPriceScale: {
       borderColor: "#26312d",
-      scaleMargins: { top: 0.08, bottom: 0.08 }
+      scaleMargins: { top: 0.08, bottom: 0.24 }
     },
     handleScroll: {
       mouseWheel: true,
@@ -914,6 +925,16 @@ function initChart() {
     priceLineWidth: 1,
     priceFormat: { type: "price", precision: 8, minMove: 0.00000001 }
   }, "addCandlestickSeries");
+
+  app.volumeSeries = createSeries(tv.HistogramSeries, {
+    priceFormat: { type: "volume" },
+    priceScaleId: "volume",
+    priceLineVisible: false,
+    lastValueVisible: false
+  }, "addHistogramSeries");
+  app.volumeSeries?.priceScale?.().applyOptions?.({
+    scaleMargins: { top: 0.8, bottom: 0 }
+  });
 
   app.vwapSeries = createSeries(tv.LineSeries, {
     title: "VWAP",
@@ -1016,6 +1037,7 @@ function drawChart({ fit = false } = {}) {
   app.chartRowsByTime = new Map(rows.map((row) => [String(row.time), row]));
   if (!rows.length) {
     app.candleSeries.setData([]);
+    app.volumeSeries?.setData([]);
     app.vwapSeries?.setData([]);
     app.channelSeries.forEach((series) => series.setData([]));
     setDefaultChartReadout(rows);
@@ -1024,6 +1046,7 @@ function drawChart({ fit = false } = {}) {
   }
 
   app.candleSeries.setData(seriesData(rows));
+  app.volumeSeries?.setData(volumeData(rows));
   const chartConfig = app.session?.chartConfig || {};
   if (chartConfig.vwapEnabled !== false && rows.length >= 2) {
     app.vwapSeries?.setData(lineData(rows, rollingVwap(rows, chartConfig.vwapPeriod || chartLimit())));

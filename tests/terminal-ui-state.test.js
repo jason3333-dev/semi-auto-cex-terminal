@@ -114,6 +114,7 @@ function loadTerminalApp() {
       ui,
       beginAction,
       createRequestError,
+      chartLimit,
       renderJobs,
       renderOrders,
       runTradeAction,
@@ -195,6 +196,16 @@ test("order form defaults to auto chase with market wording", () => {
   assert.match(html, /id="takeProfitAmountInput" type="text"[^>]*placeholder="USDC or %"/);
   assert.match(html, />\s*MARKET\s*</);
   assert.doesNotMatch(html, />\s*FAST\s*</);
+});
+
+test("chart defaults to one hour of 15 second candles and volume series", () => {
+  const { chartLimit } = loadTerminalApp();
+  const source = fs.readFileSync(path.join(ROOT, "public", "app.js"), "utf8");
+
+  assert.equal(chartLimit(), 240);
+  assert.match(source, /HistogramSeries/);
+  assert.match(source, /priceScaleId:\s*"volume"/);
+  assert.match(source, /volumeData\(rows\)/);
 });
 
 test("pending trade actions disable controls and expose concise status", () => {
