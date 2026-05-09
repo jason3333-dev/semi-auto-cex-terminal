@@ -1,5 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_REFRESH_MS = 1000;
+const DEFAULT_CHART_INTERVAL = "5m";
 const FIFTEEN_SECONDS_MS = 15_000;
 const CHART_TEXT_COLOR = "#8fa09a";
 const CHART_GRID_COLOR = "#1e2824";
@@ -349,9 +350,13 @@ function applyLivePrice(price) {
   ui.limitMetaLabel.textContent = `Last ${formatPrice(price.price)} · ${liveSourceLabel(price.source)}`;
 }
 
+function currentInterval() {
+  return ui.intervalSelect.value || DEFAULT_CHART_INTERVAL;
+}
+
 function updateLiveFifteenSecondCandle(price) {
   const numeric = Number(price);
-  if (ui.intervalSelect.value !== "15s" || !Number.isFinite(numeric) || numeric <= 0) return false;
+  if (currentInterval() !== "15s" || !Number.isFinite(numeric) || numeric <= 0) return false;
 
   const bucket = Math.floor(Date.now() / FIFTEEN_SECONDS_MS) * FIFTEEN_SECONDS_MS;
   let last = app.klines[app.klines.length - 1];
@@ -381,7 +386,7 @@ function updateLiveFifteenSecondCandle(price) {
 }
 
 function chartLimit() {
-  return (ui.intervalSelect.value || "15s") === "15s" ? 240 : 180;
+  return currentInterval() === "15s" ? 240 : 180;
 }
 
 function typicalPrice(row) {
@@ -747,7 +752,7 @@ async function loadLeverageBracket() {
 
 async function loadMarket() {
   const symbol = currentSymbol();
-  const interval = ui.intervalSelect.value;
+  const interval = currentInterval();
   const limit = chartLimit();
   const requestSeq = ++app.marketRequestSeq;
   await post("/api/market/focus", { symbol, interval }).catch(() => null);
@@ -857,7 +862,7 @@ function applyChartTimeScale() {
   if (!app.chartApi) return;
   app.chartApi.timeScale().applyOptions({
     timeVisible: true,
-    secondsVisible: ui.intervalSelect.value === "15s",
+    secondsVisible: currentInterval() === "15s",
     borderColor: "#26312d"
   });
 }
@@ -1008,7 +1013,7 @@ function handleChartCrosshair(param) {
 }
 
 function channelData(rows) {
-  const channelRows = rows.slice(ui.intervalSelect.value === "15s" ? -50 : -80);
+  const channelRows = rows.slice(currentInterval() === "15s" ? -50 : -80);
   if (channelRows.length < 20) return [[], [], []];
 
   const n = channelRows.length;

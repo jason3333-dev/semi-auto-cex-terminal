@@ -198,10 +198,14 @@ test("order form defaults to auto chase with market wording", () => {
   assert.doesNotMatch(html, />\s*FAST\s*</);
 });
 
-test("chart defaults to one hour of 15 second candles and volume series", () => {
-  const { chartLimit } = loadTerminalApp();
+test("chart defaults to 5 minute candles and keeps 15 second width available", () => {
+  const { chartLimit, ui } = loadTerminalApp();
   const source = fs.readFileSync(path.join(ROOT, "public", "app.js"), "utf8");
+  const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8");
 
+  assert.match(html, /<option value="5m" selected>5m<\/option>/);
+  assert.equal(chartLimit(), 180);
+  ui.intervalSelect.value = "15s";
   assert.equal(chartLimit(), 240);
   assert.match(source, /HistogramSeries/);
   assert.match(source, /priceScaleId:\s*"volume"/);

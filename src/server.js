@@ -2234,7 +2234,7 @@ async function handleApi(req, res, pathname, searchParams) {
   if (req.method === "POST" && pathname === "/api/market/focus") {
     const body = await readBody(req);
     const symbol = String(body.symbol || searchParams.get("symbol") || "BTCUSDT").toUpperCase();
-    const interval = String(body.interval || searchParams.get("interval") || "15s");
+    const interval = String(body.interval || searchParams.get("interval") || "5m");
     const retainedJobSymbols = activeChaseSymbols().filter((jobSymbol) => jobSymbol !== symbol);
     const focused = adapter.focusMarketDataStream
       ? adapter.focusMarketDataStream(context(), {
@@ -2254,7 +2254,7 @@ async function handleApi(req, res, pathname, searchParams) {
     json(res, 200, {
       klines: await adapter.getKlines(context(), {
         symbol: searchParams.get("symbol") || "BTCUSDT",
-        interval: searchParams.get("interval") || "15s",
+        interval: searchParams.get("interval") || "5m",
         limit: Number(searchParams.get("limit") || 180)
       })
     });
