@@ -186,6 +186,16 @@ test("formats server-side failure reasons for operator status", () => {
   );
 });
 
+test("order form defaults to auto chase with market wording", () => {
+  const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8");
+
+  assert.match(html, /id="autoChaseInput"[^>]*checked/);
+  assert.match(html, /id="stopLossAmountInput" type="text"[^>]*placeholder="USDC or %"/);
+  assert.match(html, /id="takeProfitAmountInput" type="text"[^>]*placeholder="USDC or %"/);
+  assert.match(html, />\s*MARKET\s*</);
+  assert.doesNotMatch(html, />\s*FAST\s*</);
+});
+
 test("pending trade actions disable controls and expose concise status", () => {
   const { beginAction, ui, updateActionControls } = loadTerminalApp();
 
@@ -211,7 +221,7 @@ test("pending state names every live operation control", () => {
   const { beginAction, ui } = loadTerminalApp();
   const cases = [
     ["limitOrder", ui.limitOrderButton, "지정가 전송 중"],
-    ["marketOrder", ui.limitOrderButton, "FAST 전송 중"],
+    ["marketOrder", ui.limitOrderButton, "MARKET 전송 중"],
     ["chaseStop", ui.stopChaseButton, "추격 중지 중"],
     ["reverse", ui.reverseButton, "리버스 실행 중"],
     ["cancel", ui.cancelAllButton, "취소 중"],

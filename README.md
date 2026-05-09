@@ -8,10 +8,10 @@ MemeMax Orderly perps를 기준으로 만든 로컬 반자동 트레이딩 터�
 - Orderly public WebSocket 기반 가격, 오더북, ticker, trade, kline 구독
 - 티커 변경 시 이전 market stream 구독 정리
 - OPEN/CLOSE, LONG/SHORT, 레버리지 슬라이더, 수량/지정가 입력
-- Auto chase 지정가 주문과 FAST 시장가 주문
+- 기본 Auto chase 지정가 주문과 MARKET 시장가 주문
 - Rate limit 안에서 chase replace 속도 제어
 - Reverse: 현재 포지션 chase 정리 후 반대 포지션 OPEN
-- Stop loss / take profit 금액 입력
+- Stop loss / take profit 금액 또는 `%` 비율 입력
 - 포지션, 오픈 오더, chase job, 잔액, 세션 PnL 표시
 - 긴급 정리: 오픈 오더 취소, 포지션 정리
 - 거래소 어댑터 구조: MemeMax Orderly를 기본으로 두고 필요 시 확장

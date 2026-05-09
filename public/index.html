@@ -103,24 +103,24 @@
                 <input id="stopLossEnabledInput" type="checkbox">
                 Stop Loss
               </span>
-              <input id="stopLossAmountInput" type="number" min="0" step="0.01" placeholder="USDC" inputmode="decimal" disabled>
+              <input id="stopLossAmountInput" type="text" placeholder="USDC or %" inputmode="decimal" disabled>
             </label>
             <label>
               <span class="switch-row">
                 <input id="takeProfitEnabledInput" type="checkbox">
                 Take Profit
               </span>
-              <input id="takeProfitAmountInput" type="number" min="0" step="0.01" placeholder="USDC" inputmode="decimal" disabled>
+              <input id="takeProfitAmountInput" type="text" placeholder="USDC or %" inputmode="decimal" disabled>
             </label>
           </div>
           <div class="order-mode-row">
             <label class="checkbox-label">
-              <input id="autoChaseInput" type="checkbox">
+              <input id="autoChaseInput" type="checkbox" checked>
               Auto chase
             </label>
             <label class="checkbox-label fast-label">
               <input id="fastModeInput" type="checkbox">
-              FAST
+              MARKET
             </label>
           </div>
           <div id="chaseSummary" class="order-summary">-</div>

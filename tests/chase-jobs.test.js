@@ -7,6 +7,8 @@ const {
   CHASE_FILL_STATES,
   CHASE_JOB_STATES,
   CHASE_TERMINAL_REASONS,
+  bracketTriggerPrice,
+  buildBracketConfig,
   buildChaseJob,
   buildOrderIntent,
   jobSnapshot,
@@ -126,6 +128,58 @@ test("chase replacement uses remaining quantity after partial fill", async () =>
   assert.equal(snapshot.executedQuantity, "0.4");
   assert.equal(snapshot.remainingQuantity, "0.6");
   assert.equal(snapshot.isTerminal, false);
+});
+
+test("bracket inputs accept percentages off entry price", () => {
+  resetChaseState();
+  const longIntent = buildOrderIntent({ action: "OPEN", positionSide: "LONG" });
+  const longBracket = buildBracketConfig({
+    symbol: "BTCUSDC",
+    quantity: "0.5",
+    price: "80000",
+    stopLossEnabled: true,
+    stopLossAmount: "1%",
+    takeProfitEnabled: true,
+    takeProfitAmount: "2.5%"
+  }, longIntent);
+
+  assert.equal(longBracket.stopLossMode, "percent");
+  assert.equal(longBracket.takeProfitMode, "percent");
+  assert.equal(bracketTriggerPrice(longBracket, "SL", 80000), 79200);
+  assert.equal(bracketTriggerPrice(longBracket, "TP", 80000), 82000);
+
+  const shortIntent = buildOrderIntent({ action: "OPEN", positionSide: "SHORT" });
+  const shortBracket = buildBracketConfig({
+    symbol: "BTCUSDC",
+    quantity: "0.5",
+    price: "80000",
+    stopLossEnabled: true,
+    stopLossAmount: "1%",
+    takeProfitEnabled: true,
+    takeProfitAmount: "2%"
+  }, shortIntent);
+
+  assert.equal(bracketTriggerPrice(shortBracket, "SL", 80000), 80800);
+  assert.equal(bracketTriggerPrice(shortBracket, "TP", 80000), 78400);
+});
+
+test("bracket inputs keep absolute USDC distance support", () => {
+  resetChaseState();
+  const intent = buildOrderIntent({ action: "OPEN", positionSide: "LONG" });
+  const bracket = buildBracketConfig({
+    symbol: "BTCUSDC",
+    quantity: "0.5",
+    price: "80000",
+    stopLossEnabled: true,
+    stopLossAmount: "100",
+    takeProfitEnabled: true,
+    takeProfitAmount: "250"
+  }, intent);
+
+  assert.equal(bracket.stopLossMode, "amount");
+  assert.equal(bracket.takeProfitMode, "amount");
+  assert.equal(bracketTriggerPrice(bracket, "SL", 80000), 79800);
+  assert.equal(bracketTriggerPrice(bracket, "TP", 80000), 80500);
 });
 
 test("cancel failure stops chase with explicit terminal reason", async () => {

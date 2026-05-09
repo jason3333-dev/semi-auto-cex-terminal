@@ -660,10 +660,10 @@ function buildOrderIntent(payload) {
 
 function buildBracketConfig(payload, intent) {
   if (intent.action !== "OPEN") return null;
-  const stopLossAmount = Number(payload.stopLossAmount || 0);
-  const takeProfitAmount = Number(payload.takeProfitAmount || 0);
-  const stopLossEnabled = Boolean(payload.stopLossEnabled) && stopLossAmount > 0;
-  const takeProfitEnabled = Boolean(payload.takeProfitEnabled) && takeProfitAmount > 0;
+  const stopLoss = parseBracketDistance(payload.stopLossAmount, "Stop Loss", Boolean(payload.stopLossEnabled));
+  const takeProfit = parseBracketDistance(payload.takeProfitAmount, "Take Profit", Boolean(payload.takeProfitEnabled));
+  const stopLossEnabled = Boolean(payload.stopLossEnabled) && stopLoss.value > 0;
+  const takeProfitEnabled = Boolean(payload.takeProfitEnabled) && takeProfit.value > 0;
   if (!stopLossEnabled && !takeProfitEnabled) return null;
 
   return {
@@ -674,8 +674,30 @@ function buildBracketConfig(payload, intent) {
     reduceOnly: activePositionMode() !== "hedge",
     quantity: String(payload.quantity),
     referencePrice: Number(payload.price),
-    stopLossAmount: stopLossEnabled ? stopLossAmount : 0,
-    takeProfitAmount: takeProfitEnabled ? takeProfitAmount : 0
+    stopLossAmount: stopLossEnabled && stopLoss.mode === "amount" ? stopLoss.value : 0,
+    takeProfitAmount: takeProfitEnabled && takeProfit.mode === "amount" ? takeProfit.value : 0,
+    stopLossValue: stopLossEnabled ? stopLoss.value : 0,
+    takeProfitValue: takeProfitEnabled ? takeProfit.value : 0,
+    stopLossMode: stopLossEnabled ? stopLoss.mode : "amount",
+    takeProfitMode: takeProfitEnabled ? takeProfit.mode : "amount",
+    stopLossInput: stopLossEnabled ? stopLoss.raw : "",
+    takeProfitInput: takeProfitEnabled ? takeProfit.raw : ""
+  };
+}
+
+function parseBracketDistance(value, label, enabled) {
+  if (!enabled) return { raw: "", value: 0, mode: "amount" };
+  const raw = String(value || "").trim();
+  const isPercent = raw.endsWith("%");
+  const numericText = isPercent ? raw.slice(0, -1).trim() : raw;
+  const numeric = Number(numericText);
+  if (!raw || !Number.isFinite(numeric) || numeric <= 0) {
+    throw new ExchangeError(`${label} must be a positive USDC amount or percent`);
+  }
+  return {
+    raw,
+    value: numeric,
+    mode: isPercent ? "percent" : "amount"
   };
 }
 
@@ -987,13 +1009,21 @@ function activeChaseSymbols() {
 
 function bracketTriggerPrice(bracket, kind, entryPrice) {
   const quantity = Number(bracket.quantity);
-  const amount = kind === "SL" ? bracket.stopLossAmount : bracket.takeProfitAmount;
+  const prefix = kind === "SL" ? "stopLoss" : "takeProfit";
+  const mode = String(bracket[`${prefix}Mode`] || "amount");
+  const value = Number(bracket[`${prefix}Value`] ?? bracket[`${prefix}Amount`] ?? 0);
   if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(entryPrice) || entryPrice <= 0) return 0;
-  const delta = amount / quantity;
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const delta = mode === "percent" ? entryPrice * (value / 100) : value / quantity;
   if (bracket.positionSide === "LONG") {
     return kind === "SL" ? entryPrice - delta : entryPrice + delta;
   }
   return kind === "SL" ? entryPrice + delta : entryPrice - delta;
+}
+
+function hasBracketTrigger(bracket, kind) {
+  const prefix = kind === "SL" ? "stopLoss" : "takeProfit";
+  return Number(bracket[`${prefix}Value`] ?? bracket[`${prefix}Amount`] ?? 0) > 0;
 }
 
 async function placeBracketOrders(adapter, bracket, entryPrice) {
@@ -1008,8 +1038,8 @@ async function placeBracketOrders(adapter, bracket, entryPrice) {
     quantity: bracket.quantity,
     workingType: "MARK_PRICE"
   };
-  const stopLossPrice = bracket.stopLossAmount > 0 ? bracketTriggerPrice(bracket, "SL", entryPrice) : 0;
-  const takeProfitPrice = bracket.takeProfitAmount > 0 ? bracketTriggerPrice(bracket, "TP", entryPrice) : 0;
+  const stopLossPrice = hasBracketTrigger(bracket, "SL") ? bracketTriggerPrice(bracket, "SL", entryPrice) : 0;
+  const takeProfitPrice = hasBracketTrigger(bracket, "TP") ? bracketTriggerPrice(bracket, "TP", entryPrice) : 0;
 
   if (adapter.placePositionBracketOrder && (stopLossPrice > 0 || takeProfitPrice > 0)) {
     const result = await adapter.placePositionBracketOrder(context(), {
@@ -1303,7 +1333,13 @@ function jobSnapshot(job) {
     parentJobId: job.parentJobId || "",
     bracket: job.bracket ? {
       stopLossAmount: job.bracket.stopLossAmount,
-      takeProfitAmount: job.bracket.takeProfitAmount
+      takeProfitAmount: job.bracket.takeProfitAmount,
+      stopLossValue: job.bracket.stopLossValue,
+      takeProfitValue: job.bracket.takeProfitValue,
+      stopLossMode: job.bracket.stopLossMode,
+      takeProfitMode: job.bracket.takeProfitMode,
+      stopLossInput: job.bracket.stopLossInput,
+      takeProfitInput: job.bracket.takeProfitInput
     } : null,
     reverseOpen: job.reverseOpen ? {
       symbol: job.reverseOpen.payload.symbol,
@@ -2414,7 +2450,7 @@ async function handleApi(req, res, pathname, searchParams) {
     }, { severity: "warn" });
     const entryPrice = await filledEntryPrice(adapter, body.symbol, result, body.price);
     const placed = await placeBracketOrders(adapter, bracket, entryPrice);
-    log("warn", "FAST market order submitted", {
+    log("warn", "Market order submitted", {
       symbol: body.symbol,
       action: intent.action,
       positionSide: intent.positionSide,
@@ -2620,7 +2656,7 @@ async function handleApi(req, res, pathname, searchParams) {
         closed: closeOrder,
         opened: openOrder
       }, { severity: "warn" });
-      log("warn", "FAST reverse executed", {
+      log("warn", "Market reverse executed", {
         symbol,
         from: selectedSide,
         to: openSide,
@@ -2780,7 +2816,9 @@ export const __test__ = {
   CHASE_FILL_STATES,
   CHASE_JOB_STATES,
   CHASE_TERMINAL_REASONS,
+  bracketTriggerPrice,
   buildChaseJob,
+  buildBracketConfig,
   buildOrderIntent,
   handlePrivateOrderUpdate,
   jobSnapshot,

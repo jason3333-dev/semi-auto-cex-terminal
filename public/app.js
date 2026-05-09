@@ -103,9 +103,9 @@ const ACTION_COPY = {
     pending: "지정가 전송 중"
   },
   marketOrder: {
-    title: "FAST",
-    idle: "FAST 주문",
-    pending: "FAST 전송 중"
+    title: "MARKET",
+    idle: "MARKET 주문",
+    pending: "MARKET 전송 중"
   },
   chaseStart: {
     title: "CHASE START",
@@ -288,15 +288,25 @@ function selectedPriceBasis() {
   return app.lastPriceValue;
 }
 
+function parseRiskInput(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const percent = raw.endsWith("%");
+  const numericText = percent ? raw.slice(0, -1).trim() : raw;
+  const numeric = Number(numericText);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return { raw, value: numeric, mode: percent ? "percent" : "amount" };
+}
+
 function riskTriggerPrice(kind) {
   const amountInput = kind === "SL" ? ui.stopLossAmountInput : ui.takeProfitAmountInput;
   const enabledInput = kind === "SL" ? ui.stopLossEnabledInput : ui.takeProfitEnabledInput;
   if (!enabledInput.checked) return "";
-  const amount = Number(amountInput.value);
+  const risk = parseRiskInput(amountInput.value);
   const qty = Number(ui.quantityInput.value);
   const entry = selectedPriceBasis();
-  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(qty) || qty <= 0 || !entry) return "";
-  const delta = amount / qty;
+  if (!risk || !Number.isFinite(qty) || qty <= 0 || !entry) return "";
+  const delta = risk.mode === "percent" ? entry * (risk.value / 100) : risk.value / qty;
   if (app.selectedIntent === "LONG") {
     return formatPrice(kind === "SL" ? entry - delta : entry + delta);
   }
@@ -462,7 +472,7 @@ function updateLeverageDisplay() {
   ui.leverageMaxLabel.textContent = `max ${app.leverageMax}x`;
 }
 
-function normalizeOrderMode(preferred = "FAST") {
+function normalizeOrderMode(preferred = "MARKET") {
   if (!ui.autoChaseInput.checked || !ui.fastModeInput.checked) return;
   if (preferred === "CHASE") {
     ui.fastModeInput.checked = false;
@@ -578,7 +588,7 @@ function updateButtonPendingState(button, label, disabled, pending) {
 }
 
 function reverseButtonLabel() {
-  return `${ui.fastModeInput.checked ? "FAST " : ""}리버스 ${app.selectedIntent} -> ${oppositeIntent(app.selectedIntent)}`;
+  return `${ui.fastModeInput.checked ? "MARKET " : ""}리버스 ${app.selectedIntent} -> ${oppositeIntent(app.selectedIntent)}`;
 }
 
 function updateActionControls() {
@@ -1390,7 +1400,7 @@ async function placeLimitOrder() {
 
 async function placeMarketOrder() {
   await post("/api/trade/market-order", orderBody());
-  toast("FAST 주문 체결 요청 완료");
+  toast("MARKET 주문 체결 요청 완료");
   await refreshAll();
 }
 
@@ -1439,7 +1449,7 @@ async function reversePosition() {
       app.hasRunningChaseJob = normalizedJobStatus(result) === "running";
       updateActionControls();
     }
-    toast(`${ui.fastModeInput.checked ? "FAST " : ""}리버스 시작 ${from} -> ${to}`);
+    toast(`${ui.fastModeInput.checked ? "MARKET " : ""}리버스 시작 ${from} -> ${to}`);
     await refreshAll();
   });
 }
@@ -1605,7 +1615,7 @@ function bindEvents() {
     updateChaseSummary();
   });
   ui.fastModeInput.addEventListener("change", () => {
-    normalizeOrderMode("FAST");
+    normalizeOrderMode("MARKET");
     updateChaseSummary();
   });
   ui.stopLossEnabledInput.addEventListener("change", () => {
