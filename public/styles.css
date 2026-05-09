@@ -276,10 +276,16 @@ h2 {
   height: 100%;
 }
 
+#priceChart a {
+  color: inherit;
+}
+
 .crosshair-readout {
   position: absolute;
   left: 12px;
   top: 10px;
+  z-index: 5;
+  max-width: calc(100% - 24px);
   min-height: 24px;
   padding: 4px 8px;
   color: var(--muted);
@@ -287,6 +293,7 @@ h2 {
   border: 1px solid var(--line);
   border-radius: 6px;
   font-size: 12px;
+  white-space: nowrap;
   pointer-events: none;
 }
 

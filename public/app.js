@@ -1,6 +1,14 @@
 const $ = (selector) => document.querySelector(selector);
 const ACCOUNT_REFRESH_MS = 1000;
 const FIFTEEN_SECONDS_MS = 15_000;
+const CHART_TEXT_COLOR = "#8fa09a";
+const CHART_GRID_COLOR = "#1e2824";
+const CHART_BG_COLOR = "#0b0f0e";
+const CHART_UP_COLOR = "#20bf74";
+const CHART_DOWN_COLOR = "#ff5c5c";
+const CHART_VWAP_COLOR = "rgba(255, 210, 114, 0.82)";
+const CHART_CHANNEL_COLOR = "rgba(90, 167, 255, 0.58)";
+const CHART_CHANNEL_MID_COLOR = "rgba(232, 184, 74, 0.52)";
 
 const ui = {
   modeBadge: $("#modeBadge"),
@@ -73,7 +81,13 @@ const app = {
   accountRefreshDelayTimer: null,
   accountRefreshInFlight: false,
   priceTimer: null,
-  chartPointer: null,
+  chartApi: null,
+  candleSeries: null,
+  vwapSeries: null,
+  channelSeries: [],
+  resizeObserver: null,
+  chartRowsByTime: new Map(),
+  chartDataSet: false,
   symbolApplyTimer: null,
   marketRequestSeq: 0,
   hasRunningChaseJob: false,
@@ -741,177 +755,266 @@ async function loadPriceTick() {
   }
 }
 
-function drawChart() {
-  const canvas = ui.chart;
-  const ctx = canvas.getContext("2d");
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const width = Math.max(320, Math.floor(rect.width * dpr));
-  const height = Math.max(260, Math.floor(rect.height * dpr));
-  if (canvas.width !== width || canvas.height !== height) {
-    canvas.width = width;
-    canvas.height = height;
+function chartTime(row) {
+  const openTime = Number(row.openTime);
+  if (!Number.isFinite(openTime) || openTime <= 0) return 0;
+  return Math.floor(openTime / 1000);
+}
+
+function toLightweightRows(rows = app.klines) {
+  const byTime = new Map();
+  rows.forEach((row) => {
+    const time = chartTime(row);
+    const open = Number(row.open);
+    const high = Number(row.high);
+    const low = Number(row.low);
+    const close = Number(row.close);
+    if (![time, open, high, low, close].every((value) => Number.isFinite(value)) || time <= 0) return;
+    byTime.set(time, {
+      time,
+      open,
+      high,
+      low,
+      close,
+      volume: Number(row.volume || 0),
+      openTime: time * 1000
+    });
+  });
+  return Array.from(byTime.values()).sort((left, right) => left.time - right.time);
+}
+
+function seriesData(rows) {
+  return rows.map((row) => ({
+    time: row.time,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close
+  }));
+}
+
+function lineData(rows, values) {
+  return rows
+    .map((row, index) => ({ time: row.time, value: Number(values[index]) }))
+    .filter((row) => Number.isFinite(row.value));
+}
+
+function createSeries(seriesType, options, legacyMethod) {
+  if (!app.chartApi) return null;
+  if (typeof app.chartApi.addSeries === "function" && seriesType) {
+    return app.chartApi.addSeries(seriesType, options);
   }
+  if (legacyMethod && typeof app.chartApi[legacyMethod] === "function") {
+    return app.chartApi[legacyMethod](options);
+  }
+  return null;
+}
 
-  ctx.clearRect(0, 0, width, height);
-  ctx.fillStyle = "#0b0f0e";
-  ctx.fillRect(0, 0, width, height);
+function resizeLightweightChart() {
+  if (!app.chartApi || !ui.chart) return;
+  const rect = ui.chart.getBoundingClientRect();
+  const width = Math.max(320, Math.floor(rect.width));
+  const height = Math.max(260, Math.floor(rect.height));
+  app.chartApi.resize(width, height);
+}
 
-  const padding = {
-    top: 20 * dpr,
-    right: 70 * dpr,
-    bottom: 28 * dpr,
-    left: 14 * dpr
-  };
-  const plotW = width - padding.left - padding.right;
-  const plotH = height - padding.top - padding.bottom;
+function applyChartTimeScale() {
+  if (!app.chartApi) return;
+  app.chartApi.timeScale().applyOptions({
+    timeVisible: true,
+    secondsVisible: ui.intervalSelect.value === "15s",
+    borderColor: "#26312d"
+  });
+}
 
-  const rows = app.klines;
-  if (!rows.length) {
-    ctx.fillStyle = "#8fa09a";
-    ctx.fillText("No chart data", padding.left, padding.top + 20);
+function initChart() {
+  if (app.chartApi) return;
+  const tv = window.LightweightCharts;
+  if (!tv?.createChart) {
+    ui.crosshairReadout.textContent = "Chart library missing";
     return;
   }
 
-  const highs = rows.map((row) => Number(row.high));
-  const lows = rows.map((row) => Number(row.low));
-  const rawMax = Math.max(...highs);
-  const rawMin = Math.min(...lows);
-  const rawSpan = Math.max(rawMax - rawMin, rawMax * 0.002);
-  const max = rawMax + rawSpan * 0.08;
-  const min = rawMin - rawSpan * 0.08;
-  const span = max - min;
-  const priceToY = (price) => padding.top + ((max - price) / span) * plotH;
-  const candleW = Math.max(3 * dpr, plotW / rows.length * 0.62);
-  const gapW = plotW / rows.length;
-
-  ctx.strokeStyle = "#1e2824";
-  ctx.lineWidth = 1 * dpr;
-  ctx.font = `${11 * dpr}px ui-sans-serif, system-ui`;
-  ctx.fillStyle = "#70807a";
-  for (let grid = 0; grid <= 4; grid += 1) {
-    const y = padding.top + (plotH / 4) * grid;
-    const price = max - (span / 4) * grid;
-    ctx.beginPath();
-    ctx.moveTo(padding.left, y);
-    ctx.lineTo(width - padding.right + 8 * dpr, y);
-    ctx.stroke();
-    ctx.fillText(formatPrice(price), width - padding.right + 12 * dpr, y + 4 * dpr);
-  }
-
-  rows.forEach((row, index) => {
-    const open = Number(row.open);
-    const close = Number(row.close);
-    const high = Number(row.high);
-    const low = Number(row.low);
-    const x = padding.left + gapW * index + gapW / 2;
-    const yOpen = priceToY(open);
-    const yClose = priceToY(close);
-    const yHigh = priceToY(high);
-    const yLow = priceToY(low);
-    const up = close >= open;
-    const color = up ? "#20bf74" : "#ff5c5c";
-
-    ctx.strokeStyle = color;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.moveTo(x, yHigh);
-    ctx.lineTo(x, yLow);
-    ctx.stroke();
-
-    const bodyY = Math.min(yOpen, yClose);
-    const bodyH = Math.max(1.5 * dpr, Math.abs(yClose - yOpen));
-    ctx.fillRect(x - candleW / 2, bodyY, candleW, bodyH);
+  const rect = ui.chart.getBoundingClientRect();
+  app.chartApi = tv.createChart(ui.chart, {
+    width: Math.max(320, Math.floor(rect.width)),
+    height: Math.max(260, Math.floor(rect.height)),
+    layout: {
+      background: { type: "solid", color: CHART_BG_COLOR },
+      textColor: CHART_TEXT_COLOR,
+      fontFamily: "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+      attributionLogo: true
+    },
+    localization: {
+      priceFormatter: (price) => formatPrice(price)
+    },
+    grid: {
+      vertLines: { color: "rgba(30, 40, 36, 0.42)" },
+      horzLines: { color: CHART_GRID_COLOR }
+    },
+    crosshair: {
+      mode: tv.CrosshairMode?.Normal ?? 0,
+      vertLine: {
+        color: "rgba(143, 160, 154, 0.58)",
+        labelBackgroundColor: "#141917"
+      },
+      horzLine: {
+        color: "rgba(143, 160, 154, 0.58)",
+        labelBackgroundColor: "#141917"
+      }
+    },
+    rightPriceScale: {
+      borderColor: "#26312d",
+      scaleMargins: { top: 0.08, bottom: 0.08 }
+    },
+    handleScroll: {
+      mouseWheel: true,
+      pressedMouseMove: true,
+      horzTouchDrag: true,
+      vertTouchDrag: false
+    },
+    handleScale: {
+      axisPressedMouseMove: true,
+      mouseWheel: true,
+      pinch: true
+    }
   });
 
+  app.candleSeries = createSeries(tv.CandlestickSeries, {
+    upColor: CHART_UP_COLOR,
+    downColor: CHART_DOWN_COLOR,
+    borderVisible: false,
+    wickUpColor: CHART_UP_COLOR,
+    wickDownColor: CHART_DOWN_COLOR,
+    priceLineColor: "#e8b84a",
+    priceLineWidth: 1,
+    priceFormat: { type: "price", precision: 8, minMove: 0.00000001 }
+  }, "addCandlestickSeries");
+
+  app.vwapSeries = createSeries(tv.LineSeries, {
+    title: "VWAP",
+    color: CHART_VWAP_COLOR,
+    lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false
+  }, "addLineSeries");
+
+  const dashed = tv.LineStyle?.Dashed ?? 2;
+  app.channelSeries = [
+    createSeries(tv.LineSeries, {
+      color: CHART_CHANNEL_COLOR,
+      lineWidth: 1,
+      lineStyle: dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    }, "addLineSeries"),
+    createSeries(tv.LineSeries, {
+      color: CHART_CHANNEL_MID_COLOR,
+      lineWidth: 1,
+      lineStyle: dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    }, "addLineSeries"),
+    createSeries(tv.LineSeries, {
+      color: CHART_CHANNEL_COLOR,
+      lineWidth: 1,
+      lineStyle: dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false
+    }, "addLineSeries")
+  ].filter(Boolean);
+
+  app.chartApi.subscribeCrosshairMove(handleChartCrosshair);
+  if (window.ResizeObserver) {
+    app.resizeObserver = new ResizeObserver(resizeLightweightChart);
+    app.resizeObserver.observe(ui.chart);
+  }
+  applyChartTimeScale();
+  resizeLightweightChart();
+}
+
+function setDefaultChartReadout(rows) {
+  const last = rows[rows.length - 1];
+  ui.crosshairReadout.textContent = last ? `C ${formatPrice(last.close)}` : "No chart data";
+}
+
+function handleChartCrosshair(param) {
+  const time = typeof param?.time === "number" ? param.time : 0;
+  const data = app.candleSeries && param?.seriesData?.get(app.candleSeries);
+  const row = data && Number.isFinite(Number(data.close))
+    ? { ...data, time }
+    : app.chartRowsByTime.get(String(time));
+  if (!row || !time) {
+    setDefaultChartReadout(Array.from(app.chartRowsByTime.values()));
+    return;
+  }
+  const date = new Date(time * 1000).toLocaleString("ko-KR", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
+  ui.crosshairReadout.textContent = `${date} O ${formatPrice(row.open)} H ${formatPrice(row.high)} L ${formatPrice(row.low)} C ${formatPrice(row.close)}`;
+}
+
+function channelData(rows) {
+  const channelRows = rows.slice(ui.intervalSelect.value === "15s" ? -50 : -80);
+  if (channelRows.length < 20) return [[], [], []];
+
+  const n = channelRows.length;
+  const closes = channelRows.map((row) => Number(row.close));
+  const sumX = (n * (n - 1)) / 2;
+  const sumY = closes.reduce((total, value) => total + value, 0);
+  const sumXX = ((n - 1) * n * (2 * n - 1)) / 6;
+  const sumXY = closes.reduce((total, value, index) => total + index * value, 0);
+  const slope = (n * sumXY - sumX * sumY) / Math.max(1, n * sumXX - sumX * sumX);
+  const intercept = (sumY - slope * sumX) / n;
+  const residuals = closes.map((value, index) => value - (intercept + slope * index));
+  const widthBand = Math.max(...residuals.map((value) => Math.abs(value)));
+
+  return [widthBand, 0, -widthBand].map((shift) => channelRows.map((row, index) => ({
+    time: row.time,
+    value: intercept + slope * index + shift
+  })));
+}
+
+function drawChart({ fit = false } = {}) {
+  initChart();
+  if (!app.chartApi || !app.candleSeries) return;
+  applyChartTimeScale();
+
+  const rows = toLightweightRows();
+  app.chartRowsByTime = new Map(rows.map((row) => [String(row.time), row]));
+  if (!rows.length) {
+    app.candleSeries.setData([]);
+    app.vwapSeries?.setData([]);
+    app.channelSeries.forEach((series) => series.setData([]));
+    setDefaultChartReadout(rows);
+    app.chartDataSet = false;
+    return;
+  }
+
+  app.candleSeries.setData(seriesData(rows));
   const chartConfig = app.session?.chartConfig || {};
   if (chartConfig.vwapEnabled !== false && rows.length >= 2) {
-    const vwapValues = rollingVwap(rows, chartConfig.vwapPeriod || chartLimit());
-    ctx.strokeStyle = "rgba(255, 210, 114, 0.78)";
-    ctx.lineWidth = 1.1 * dpr;
-    ctx.setLineDash([]);
-    ctx.beginPath();
-    vwapValues.forEach((value, index) => {
-      const x = padding.left + gapW * index + gapW / 2;
-      const y = priceToY(value);
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-
-  }
-
-  const channelRows = rows.slice(ui.intervalSelect.value === "15s" ? -50 : -80);
-  if (channelRows.length >= 20) {
-    const offset = rows.length - channelRows.length;
-    const n = channelRows.length;
-    const closes = channelRows.map((row) => Number(row.close));
-    const sumX = (n * (n - 1)) / 2;
-    const sumY = closes.reduce((total, value) => total + value, 0);
-    const sumXX = ((n - 1) * n * (2 * n - 1)) / 6;
-    const sumXY = closes.reduce((total, value, index) => total + index * value, 0);
-    const slope = (n * sumXY - sumX * sumY) / Math.max(1, n * sumXX - sumX * sumX);
-    const intercept = (sumY - slope * sumX) / n;
-    const residuals = closes.map((value, index) => value - (intercept + slope * index));
-    const widthBand = Math.max(...residuals.map((value) => Math.abs(value)));
-
-    const drawChannelLine = (shift, color, dash = []) => {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 0.9 * dpr;
-      ctx.setLineDash(dash.map((item) => item * dpr));
-      ctx.beginPath();
-      for (let index = 0; index < n; index += 1) {
-        const globalIndex = offset + index;
-        const x = padding.left + gapW * globalIndex + gapW / 2;
-        const y = priceToY(intercept + slope * index + shift);
-        if (index === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
-    };
-
-    drawChannelLine(widthBand, "rgba(90, 167, 255, 0.42)");
-    drawChannelLine(0, "rgba(232, 184, 74, 0.38)", [4, 5]);
-    drawChannelLine(-widthBand, "rgba(90, 167, 255, 0.42)");
-  }
-
-  const last = Number(rows[rows.length - 1].close);
-  const lastY = priceToY(last);
-  ctx.strokeStyle = "#e8b84a";
-  ctx.setLineDash([5 * dpr, 5 * dpr]);
-  ctx.beginPath();
-  ctx.moveTo(padding.left, lastY);
-  ctx.lineTo(width - padding.right, lastY);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  if (app.chartPointer) {
-    const x = app.chartPointer.x * dpr;
-    const y = app.chartPointer.y * dpr;
-    ctx.strokeStyle = "rgba(143, 160, 154, 0.55)";
-    ctx.beginPath();
-    ctx.moveTo(x, padding.top);
-    ctx.lineTo(x, height - padding.bottom);
-    ctx.moveTo(padding.left, y);
-    ctx.lineTo(width - padding.right, y);
-    ctx.stroke();
-
-    const index = Math.max(0, Math.min(rows.length - 1, Math.floor((x - padding.left) / gapW)));
-    const row = rows[index];
-    if (row) {
-      const date = new Date(row.openTime).toLocaleString("ko-KR", {
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit"
-      });
-      ui.crosshairReadout.textContent = `${date} O ${formatPrice(row.open)} H ${formatPrice(row.high)} L ${formatPrice(row.low)} C ${formatPrice(row.close)}`;
-    }
+    app.vwapSeries?.setData(lineData(rows, rollingVwap(rows, chartConfig.vwapPeriod || chartLimit())));
   } else {
-    ui.crosshairReadout.textContent = `C ${formatPrice(rows[rows.length - 1].close)}`;
+    app.vwapSeries?.setData([]);
   }
+
+  const channels = channelData(rows);
+  app.channelSeries.forEach((series, index) => series.setData(channels[index] || []));
+  setDefaultChartReadout(rows);
+
+  if (fit || !app.chartDataSet) {
+    app.chartApi.timeScale().fitContent();
+  }
+  app.chartDataSet = true;
 }
 
 function startAccountPolling() {
@@ -1416,8 +1519,8 @@ async function applySymbolChange() {
   app.positions = [];
   app.klines = [];
   app.orderBook = null;
-  app.chartPointer = null;
-  drawChart();
+  app.chartDataSet = false;
+  drawChart({ fit: true });
   syncCloseQuantityFromPositions();
   await loadLeverageBracket();
   scheduleLeverageApply();
@@ -1464,7 +1567,10 @@ function bindEvents() {
     scheduleLeverageApply();
     await refreshAll();
   });
-  ui.intervalSelect.addEventListener("change", loadMarket);
+  ui.intervalSelect.addEventListener("change", () => {
+    app.chartDataSet = false;
+    loadMarket();
+  });
   ui.positionsRefresh.addEventListener("click", loadAccount);
   ui.ordersRefresh.addEventListener("click", loadAccount);
   ui.limitOrderButton.addEventListener("click", submitLimitOrder);
@@ -1505,23 +1611,12 @@ function bindEvents() {
     control.addEventListener("input", updateChaseSummary);
     control.addEventListener("change", updateChaseSummary);
   });
-  ui.chart.addEventListener("pointermove", (event) => {
-    const rect = ui.chart.getBoundingClientRect();
-    app.chartPointer = {
-      x: event.clientX - rect.left,
-      y: event.clientY - rect.top
-    };
-    drawChart();
-  });
-  ui.chart.addEventListener("pointerleave", () => {
-    app.chartPointer = null;
-    drawChart();
-  });
-  window.addEventListener("resize", drawChart);
+  window.addEventListener("resize", resizeLightweightChart);
 }
 
 async function boot() {
   bindEvents();
+  initChart();
   await loadSession();
   connectAccountEvents();
   await loadSymbols();

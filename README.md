@@ -4,7 +4,7 @@ MemeMax Orderly perps를 기준으로 만든 로컬 반자동 트레이딩 터�
 
 ## 주요 기능
 
-- MemeMax Orderly perp 심볼 검색과 15초 기본 차트
+- MemeMax Orderly perp 심볼 검색과 TradingView Lightweight Charts 기반 15초 기본 차트
 - Orderly public WebSocket 기반 가격, 오더북, ticker, trade, kline 구독
 - 티커 변경 시 이전 market stream 구독 정리
 - OPEN/CLOSE, LONG/SHORT, 레버리지 슬라이더, 수량/지정가 입력
@@ -158,6 +158,10 @@ CHART_VWAP_PERIOD=80
 - Private WebSocket: execution report, position, balance/account updates
 
 15초 봉은 Orderly의 1분 kline과 trade/ticker stream을 합쳐 로컬에서 합성합니다.
+
+## 차트 엔진
+
+차트는 TradingView Lightweight Charts v5.0.8 standalone 파일을 `public/vendor/`에 vendoring해서 사용합니다. 포터블 실행 파일에서도 인터넷 없이 동작하며, 라이브러리 라이선스 파일은 `public/vendor/lightweight-charts.LICENSE.txt`에 포함되어 있습니다. TradingView attribution logo는 차트 옵션에서 켜 둡니다.
 
 ## 기타 어댑터
 

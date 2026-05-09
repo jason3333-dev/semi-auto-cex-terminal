@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MemeMax Orderly Terminal</title>
   <link rel="stylesheet" href="/styles.css">
+  <script src="/vendor/lightweight-charts.standalone.production.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -62,7 +63,7 @@
           </div>
         </div>
         <div class="chart-wrap">
-          <canvas id="priceChart" aria-label="캔들 차트"></canvas>
+          <div id="priceChart" role="img" aria-label="캔들 차트"></div>
           <div id="crosshairReadout" class="crosshair-readout">C -</div>
         </div>
       </section>
