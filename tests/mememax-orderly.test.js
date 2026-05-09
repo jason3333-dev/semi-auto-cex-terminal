@@ -31,6 +31,86 @@ test("MemeMax request preserves array JSON bodies", async () => {
   assert.equal(capturedBody, '[{"symbol":"PERP_BTC_USDC","child_orders":[{"trigger_price":65000}]}]');
 });
 
+test("MemeMax signed requests apply configured Orderly credentials", async () => {
+  const adapter = new MememaxOrderlyAdapter();
+  const originalFetch = global.fetch;
+  let capturedUrl = "";
+  let capturedHeaders = {};
+
+  global.fetch = async (url, options) => {
+    capturedUrl = String(url);
+    capturedHeaders = options.headers;
+    return new Response('{"success":true,"data":{}}', {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    await adapter.request(
+      {
+        mode: "live",
+        credentials: {
+          accountId: "0x0000000000000000000000000000000000000000000000000000000000000001",
+          orderlyKey: "ed25519:test-public-key",
+          orderlySecret: "1111111111111111111111111111111",
+          baseUrl: "https://api.example.mememax"
+        }
+      },
+      "GET",
+      "/v1/client/info",
+      {},
+      { signed: true }
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.equal(capturedUrl, "https://api.example.mememax/v1/client/info");
+  assert.equal(capturedHeaders["Content-Type"], "application/x-www-form-urlencoded");
+  assert.equal(capturedHeaders["orderly-account-id"], "0x0000000000000000000000000000000000000000000000000000000000000001");
+  assert.equal(capturedHeaders["orderly-key"], "ed25519:test-public-key");
+  assert.match(capturedHeaders["orderly-timestamp"], /^\d+$/);
+  assert.ok(capturedHeaders["orderly-signature"]);
+});
+
+test("MemeMax signed requests derive Orderly key when it is omitted", async () => {
+  const adapter = new MememaxOrderlyAdapter();
+  const originalFetch = global.fetch;
+  let capturedHeaders = {};
+
+  global.fetch = async (url, options) => {
+    capturedHeaders = options.headers;
+    return new Response('{"success":true,"data":{}}', {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    await adapter.request(
+      {
+        mode: "live",
+        credentials: {
+          accountId: "0x0000000000000000000000000000000000000000000000000000000000000002",
+          orderlySecret: "1111111111111111111111111111111",
+          baseUrl: "https://api.example.mememax"
+        }
+      },
+      "GET",
+      "/v1/client/info",
+      {},
+      { signed: true }
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+
+  assert.match(capturedHeaders["orderly-key"], /^ed25519:[1-9A-HJ-NP-Za-km-z]+$/);
+  assert.notEqual(capturedHeaders["orderly-key"], "1111111111111111111111111111111");
+  assert.ok(capturedHeaders["orderly-signature"]);
+});
+
 test("MemeMax positional bracket packs SL and TP in one adapter call", async () => {
   const adapter = new MememaxOrderlyAdapter();
   const result = await adapter.placePositionBracketOrder(

@@ -5,6 +5,7 @@
 node_modules/
 dist/
 coverage/
+runtime/
 .DS_Store
 Thumbs.db
 *.log

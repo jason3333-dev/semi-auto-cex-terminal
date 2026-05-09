@@ -3,8 +3,19 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractPrivateOrderUpdate, uiSymbolFromExchangeSymbol } from "./account-stream-normalizers.js";
+import { createAuditLogger, defaultAuditLogPath } from "./audit-log.js";
 import { getExchange, listExchanges } from "./exchanges/registry.js";
 import { ExchangeError } from "./exchanges/types.js";
+import {
+  LIVE_UNLOCK_PHRASE,
+  assertLiveRiskLeverage,
+  assertLiveRiskOrder,
+  assertLiveRiskSymbol,
+  assertLiveRiskUnlocked,
+  liveRiskConfigFromEnv,
+  normalizeRiskSymbol,
+  publicLiveRiskConfig
+} from "./live-risk.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,7 +30,6 @@ function argValue(name) {
 
 const BASE_ENV_PATH = path.resolve(argValue("--base-env") || path.join(ROOT_DIR, ".env"));
 const SESSION_ENV_PATH = path.resolve(argValue("--session-env") || path.join(ROOT_DIR, ".env.session"));
-const LIVE_UNLOCK_PHRASE = "I_ACCEPT_LIVE_RISK";
 const MAX_BODY_BYTES = 1024 * 1024;
 
 function parseEnvValue(value) {
@@ -126,6 +136,35 @@ const ACCOUNT_STREAM_KEEPALIVE_MS = Math.max(60_000, envNumber("ACCOUNT_STREAM_K
 const ACCOUNT_STREAM_RECONNECT_MS = Math.max(1000, envNumber("ACCOUNT_STREAM_RECONNECT_MS", 5000));
 const CHART_VWAP_ENABLED = envBoolean("CHART_VWAP_ENABLED", true);
 const CHART_VWAP_PERIOD = Math.max(1, Math.min(500, envNumber("CHART_VWAP_PERIOD", 80)));
+const CHASE_JOB_STATES = Object.freeze({
+  RUNNING: "running",
+  STOPPING: "stopping",
+  STOPPED: "stopped",
+  FILLED: "filled",
+  DONE: "done",
+  ERROR: "error"
+});
+const CHASE_TERMINAL_REASONS = Object.freeze({
+  NONE: "",
+  FILLED: "filled",
+  REPLACE_RACE_FILLED: "replace-race-filled",
+  MAX_REPLACES: "max-replaces",
+  USER_STOPPED: "user-stopped",
+  CANCEL_FAILED: "cancel-failed",
+  REPLACE_FAILED: "replace-failed",
+  TRANSIENT_EXHAUSTED: "transient-exhausted",
+  EXCHANGE_ERROR: "exchange-error",
+  STOPPED_DURING_RATE_WAIT: "stopped-during-rate-wait"
+});
+const CHASE_FILL_STATES = Object.freeze({
+  NONE: "none",
+  PARTIAL: "partial",
+  FILLED: "filled"
+});
+const ORDER_AUDIT_LOG_PATH = path.resolve(
+  process.env.ORDER_AUDIT_LOG_PATH || process.env.AUDIT_LOG_PATH || defaultAuditLogPath()
+);
+const auditLogger = createAuditLogger({ filePath: ORDER_AUDIT_LOG_PATH });
 
 const state = {
   exchangeId: process.env.SESSION_EXCHANGE_ID || process.env.EXCHANGE_ID || "mememax-orderly",
@@ -219,6 +258,10 @@ function envBooleanForExchange(name, fallback) {
   return fallback;
 }
 
+function activeLiveRiskConfig() {
+  return liveRiskConfigFromEnv(process.env, { exchangePrefix: exchangeEnvPrefix() });
+}
+
 function activeChaseConfig(adapter = getExchange(state.exchangeId)) {
   const adapterConfig = adapter.chaseConfig?.(context()) || {};
   const minUpdateMs = Math.max(1, envNumberForExchange(
@@ -292,6 +335,54 @@ function log(level, message, meta = {}) {
   console.log(`[${entry.time}] ${level.toUpperCase()} ${message}`);
 }
 
+function auditKnownSecrets() {
+  const credentials = activeCredentials();
+  return [
+    credentials.apiKey,
+    credentials.apiSecret,
+    credentials.accountId,
+    credentials.orderlyKey,
+    credentials.orderlySecret
+  ].filter((value) => typeof value === "string" && value.length >= 4);
+}
+
+function auditContextPayload(extra = {}) {
+  return {
+    exchangeId: state.exchangeId,
+    mode: state.mode,
+    accountMode: activeAccountMode(),
+    positionMode: activePositionMode(),
+    ...extra
+  };
+}
+
+function auditErrorPayload(error) {
+  return {
+    name: error?.name || "Error",
+    message: error?.message || String(error),
+    details: error?.details || {}
+  };
+}
+
+function auditOrderEvent(event, payload = {}, options = {}) {
+  try {
+    auditLogger.write(event, auditContextPayload(payload), {
+      severity: options.severity || "info",
+      knownSecrets: auditKnownSecrets()
+    });
+  } catch (error) {
+    log("warn", "Order audit log write failed", {
+      event,
+      path: auditLogger.filePath,
+      error: error.message
+    });
+  }
+}
+
+function isTradeApiPath(pathname) {
+  return pathname.startsWith("/api/trade/");
+}
+
 function logEnvFileDetection() {
   for (const report of ENV_LOAD_REPORT) {
     const status = report.exists ? "detected" : "missing";
@@ -316,7 +407,8 @@ function context() {
     accountMode: activeAccountMode(),
     positionMode: activePositionMode(),
     credentials: activeCredentials(),
-    liveUnlocked: state.liveUnlocked
+    liveUnlocked: state.liveUnlocked,
+    liveRisk: activeLiveRiskConfig()
   };
 }
 
@@ -324,6 +416,7 @@ function publicSession() {
   const credentials = activeCredentials();
   const adapter = getExchange(state.exchangeId);
   const chaseConfig = activeChaseConfig(adapter);
+  const liveRiskConfig = activeLiveRiskConfig();
   return {
     exchangeId: state.exchangeId,
     mode: state.mode,
@@ -332,8 +425,13 @@ function publicSession() {
     hasApiSecret: hasActiveApiSecret(credentials),
     apiKeyPreview: activeCredentialPreview(credentials),
     liveUnlocked: state.liveUnlocked,
+    liveRisk: publicLiveRiskConfig(liveRiskConfig, { mode: state.mode }),
     sessionEnvFile: ".env.session",
     sessionPersisted: fs.existsSync(SESSION_ENV_PATH),
+    auditLog: {
+      format: "jsonl",
+      path: auditLogger.filePath
+    },
     accountConfig: {
       accountMode: activeAccountMode(),
       positionMode: activePositionMode()
@@ -459,15 +557,72 @@ function serveStatic(req, res, pathname) {
 }
 
 function requireLiveGuard(actionName) {
-  if (state.mode === "live" && !state.liveUnlocked) {
-    throw new ExchangeError(`${actionName} requires live unlock phrase`);
-  }
+  assertLiveRiskUnlocked(riskContext(), actionName);
 }
 
 function requireConfirm(payload, expected, actionName) {
   if (payload.confirm !== expected) {
     throw new ExchangeError(`${actionName} requires confirm="${expected}"`);
   }
+}
+
+function requireLiveConfirm(payload, expected, actionName) {
+  if (state.mode === "live") {
+    requireConfirm(payload, expected, actionName);
+  }
+}
+
+function riskContext() {
+  return {
+    mode: state.mode,
+    liveUnlocked: state.liveUnlocked,
+    riskConfig: activeLiveRiskConfig()
+  };
+}
+
+function requireLiveRiskSymbol(actionName, symbol) {
+  return assertLiveRiskSymbol(riskContext(), actionName, symbol);
+}
+
+function requireLiveRiskLeverage(actionName, leverage, options = {}) {
+  assertLiveRiskLeverage(riskContext(), actionName, leverage, options);
+}
+
+function requireLiveRiskOrder(actionName, payload, intent, price) {
+  return assertLiveRiskOrder(riskContext(), actionName, {
+    symbol: payload.symbol,
+    action: intent.action,
+    leverage: payload.leverage,
+    quantity: payload.quantity,
+    price
+  });
+}
+
+async function liveRiskMarketPrice(adapter, actionName, symbol) {
+  const normalized = requireLiveRiskSymbol(actionName, symbol);
+  if (state.mode !== "live") return 0;
+  try {
+    const ticker = await adapter.getTicker(context(), normalized);
+    const price = Number(ticker.price);
+    if (Number.isFinite(price) && price > 0) return price;
+  } catch (error) {
+    throw new ExchangeError(
+      `Live risk guard blocked ${actionName}: could not fetch a reference price for ${normalized}`,
+      {
+        guardrail: "price-fetch",
+        symbol: normalized,
+        reason: error.message
+      }
+    );
+  }
+  throw new ExchangeError(`Live risk guard blocked ${actionName}: reference price is unavailable`, {
+    guardrail: "price-invalid",
+    symbol: normalized
+  });
+}
+
+function liveRiskHasAllowedSymbols() {
+  return state.mode === "live" && activeLiveRiskConfig().allowedSymbols.length > 0;
 }
 
 function buildOrderIntent(payload) {
@@ -564,16 +719,28 @@ function buildChaseJob(payload, intent, options = {}) {
     purpose: options.purpose || "chase",
     parentJobId: options.parentJobId || "",
     reverseOpen: options.reverseOpen || null,
-    status: "running",
+    leverage: payload.leverage,
+    status: CHASE_JOB_STATES.RUNNING,
     iterations: 0,
+    originalQuantity: String(payload.quantity),
+    remainingQuantity: String(payload.quantity),
+    executedQuantity: "0",
+    fillStatus: CHASE_FILL_STATES.NONE,
+    partialFillCount: 0,
+    lastFillAt: "",
     lastPrice: "",
     marketSource: "",
     pendingPrice: "",
     nextReplaceAt: 0,
     lastStatusCheckAt: 0,
     statusSource: "",
+    lastOrderStatus: "",
+    lastPrivateOrderUpdateAt: "",
     lastWakeSource: "",
     rateGateWaitMs: 0,
+    lastRateGateWaitMs: 0,
+    rateGateStartedAt: "",
+    rateGateReleasedAt: "",
     replaceCount: 0,
     lastReplaceSentAt: "",
     lastReplaceAckAt: "",
@@ -581,13 +748,146 @@ function buildChaseJob(payload, intent, options = {}) {
     lastReplaceTotalMs: 0,
     fillSource: "",
     filledAt: "",
+    completedAt: "",
+    terminalReason: CHASE_TERMINAL_REASONS.NONE,
+    terminalReasonDetail: "",
+    stopRequestedAt: "",
+    cancelOrderError: "",
     orderId: "",
     error: "",
+    lastError: "",
+    retryCount: 0,
+    totalRetries: 0,
+    terminalReason: "",
     backoffMs: 0,
     mode: state.mode,
+    executedByOrderId: new Map(),
     createdAt: nowIso,
     updatedAt: nowIso
   };
+}
+
+function isTerminalChaseStatus(status) {
+  return [
+    CHASE_JOB_STATES.STOPPED,
+    CHASE_JOB_STATES.FILLED,
+    CHASE_JOB_STATES.DONE,
+    CHASE_JOB_STATES.ERROR
+  ].includes(status);
+}
+
+function setChaseTerminal(job, status, reason, detail = "") {
+  const nowIso = new Date().toISOString();
+  job.status = status;
+  job.terminalReason = reason || CHASE_TERMINAL_REASONS.NONE;
+  job.terminalReasonDetail = detail || "";
+  job.updatedAt = nowIso;
+  if (isTerminalChaseStatus(status)) {
+    job.completedAt = nowIso;
+  }
+}
+
+function formatChaseQuantity(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value ?? "");
+  if (Math.abs(numeric) < 1e-12) return "0";
+  return numeric.toFixed(12).replace(/\.?0+$/, "");
+}
+
+function chaseOrderStatus(value) {
+  return String(value || "").trim().toUpperCase().replace(/[-\s]+/g, "_");
+}
+
+function isFilledOrderStatus(status) {
+  return ["FILLED", "FULLY_FILLED"].includes(chaseOrderStatus(status));
+}
+
+function isPartialOrderStatus(status) {
+  return ["PARTIALLY_FILLED", "PARTIAL_FILLED", "PARTIAL_FILL"].includes(chaseOrderStatus(status));
+}
+
+function orderIdFromStatus(orderStatus, fallback = "") {
+  const orderId = orderStatus?.orderId ?? orderStatus?.order_id ?? orderStatus?.i ?? fallback;
+  return orderId === undefined || orderId === null ? "" : String(orderId);
+}
+
+function orderExecutedQuantity(orderStatus) {
+  const value = orderStatus?.executedQty
+    ?? orderStatus?.executed_quantity
+    ?? orderStatus?.executedQuantity
+    ?? orderStatus?.totalExecutedQuantity
+    ?? orderStatus?.total_executed_quantity
+    ?? orderStatus?.z;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : 0;
+}
+
+function ensureChaseFillLedger(job) {
+  if (job.executedByOrderId instanceof Map) return job.executedByOrderId;
+  job.executedByOrderId = new Map();
+  return job.executedByOrderId;
+}
+
+function currentChaseOrderQuantity(job) {
+  const remaining = Number(job.remainingQuantity || job.quantity);
+  if (Number.isFinite(remaining) && remaining > 0) return formatChaseQuantity(remaining);
+  return formatChaseQuantity(job.quantity);
+}
+
+function updateChaseFillProgress(job, orderStatus, source = "") {
+  if (!job || !orderStatus) return CHASE_FILL_STATES.NONE;
+
+  const status = chaseOrderStatus(orderStatus.status ?? orderStatus.order_status ?? orderStatus.X);
+  if (status) job.lastOrderStatus = status;
+  if (source) job.statusSource = source;
+
+  const orderId = orderIdFromStatus(orderStatus, job.orderId);
+  const executedForOrder = orderExecutedQuantity(orderStatus);
+  const ledger = ensureChaseFillLedger(job);
+  if (orderId) {
+    const previousForOrder = Number(ledger.get(orderId) || 0);
+    if (executedForOrder > previousForOrder) {
+      const delta = executedForOrder - previousForOrder;
+      const cumulative = Math.max(0, Number(job.executedQuantity || 0) + delta);
+      job.executedQuantity = formatChaseQuantity(cumulative);
+      ledger.set(orderId, executedForOrder);
+      job.lastFillAt = new Date().toISOString();
+      if (!isFilledOrderStatus(status)) {
+        job.partialFillCount = Number(job.partialFillCount || 0) + 1;
+      }
+    } else if (!ledger.has(orderId)) {
+      ledger.set(orderId, executedForOrder);
+    }
+  }
+
+  const originalQuantity = Number(job.originalQuantity || job.quantity);
+  const cumulativeExecuted = Number(job.executedQuantity || 0);
+  const remaining = Number.isFinite(originalQuantity)
+    ? Math.max(0, originalQuantity - cumulativeExecuted)
+    : Number(job.remainingQuantity || 0);
+
+  if (isFilledOrderStatus(status)) {
+    job.executedQuantity = formatChaseQuantity(
+      cumulativeExecuted > 0 ? cumulativeExecuted : (Number.isFinite(originalQuantity) ? originalQuantity : job.quantity)
+    );
+    job.remainingQuantity = "0";
+    job.fillStatus = CHASE_FILL_STATES.FILLED;
+    return CHASE_FILL_STATES.FILLED;
+  }
+
+  job.remainingQuantity = formatChaseQuantity(remaining);
+  if (isPartialOrderStatus(status) || (executedForOrder > 0 && remaining > 0)) {
+    job.fillStatus = CHASE_FILL_STATES.PARTIAL;
+    return CHASE_FILL_STATES.PARTIAL;
+  }
+
+  if (remaining <= 0 && cumulativeExecuted > 0) {
+    job.fillStatus = CHASE_FILL_STATES.FILLED;
+    return CHASE_FILL_STATES.FILLED;
+  }
+
+  job.fillStatus = job.fillStatus || CHASE_FILL_STATES.NONE;
+  return job.fillStatus;
 }
 
 function startChaseJob(adapter, job) {
@@ -607,14 +907,71 @@ function startChaseJob(adapter, job) {
     orderOpsPerReplace: job.orderOpsPerReplace,
     mode: state.mode
   });
+  auditOrderEvent("order.chase.start", {
+    job: jobSnapshot(job),
+    bracket: Boolean(job.bracket),
+    purpose: job.purpose,
+    parentJobId: job.parentJobId
+  });
   runChaseJob(adapter, job);
+  return job;
+}
+
+async function stopChaseJob(adapter, job, { cancelOrder = true } = {}) {
+  if (!job) throw new ExchangeError("Pegged limit job not found");
+  job.status = CHASE_JOB_STATES.STOPPING;
+  job.stopRequestedAt = new Date().toISOString();
+  job.updatedAt = job.stopRequestedAt;
+  job.terminalReason = CHASE_TERMINAL_REASONS.NONE;
+  job.terminalReasonDetail = "";
+
+  if (cancelOrder && job.orderId) {
+    try {
+      const result = await adapter.cancelOrder(context(), { symbol: job.symbol, orderId: job.orderId });
+      auditOrderEvent("order.cancel", {
+        jobId: job.id,
+        symbol: job.symbol,
+        orderId: job.orderId,
+        reason: "chase-stop",
+        response: result
+      }, { severity: "warn" });
+      if (explicitCancelFailure(result)) {
+        throw new ExchangeError("Exchange did not confirm chase order cancellation", {
+          cancelResult: result
+        });
+      }
+    } catch (error) {
+      setChaseTerminal(
+        job,
+        CHASE_JOB_STATES.ERROR,
+        CHASE_TERMINAL_REASONS.CANCEL_FAILED,
+        error.message
+      );
+      job.cancelOrderError = error.message;
+      job.error = `Cancel failed while stopping chase: ${error.message}`;
+      log("error", "Pegged limit job stop cancel failed", {
+        jobId: job.id,
+        symbol: job.symbol,
+        error: error.message
+      });
+      return job;
+    }
+  }
+
+  setChaseTerminal(
+    job,
+    CHASE_JOB_STATES.STOPPED,
+    CHASE_TERMINAL_REASONS.USER_STOPPED,
+    cancelOrder && job.orderId ? "open-order-canceled" : "no-open-order-cancel"
+  );
+  log("warn", "Pegged limit job stopped", { jobId: job.id, symbol: job.symbol });
   return job;
 }
 
 function activeChaseSymbols() {
   return Array.from(new Set(
     Array.from(state.chaseJobs.values())
-      .filter((job) => job.status === "running" && job.symbol)
+      .filter((job) => job.status === CHASE_JOB_STATES.RUNNING && job.symbol)
       .map((job) => job.symbol)
   ));
 }
@@ -632,6 +989,7 @@ function bracketTriggerPrice(bracket, kind, entryPrice) {
 
 async function placeBracketOrders(adapter, bracket, entryPrice) {
   if (!bracket) return [];
+  requireLiveRiskSymbol("Bracket order", bracket.symbol);
   const placed = [];
   const common = {
     symbol: bracket.symbol,
@@ -650,7 +1008,19 @@ async function placeBracketOrders(adapter, bracket, entryPrice) {
       stopLossPrice: stopLossPrice > 0 ? stopLossPrice : undefined,
       takeProfitPrice: takeProfitPrice > 0 ? takeProfitPrice : undefined
     });
-    return Array.isArray(result) ? result : [result].filter(Boolean);
+    const bracketOrders = Array.isArray(result) ? result : [result].filter(Boolean);
+    auditOrderEvent("order.bracket", {
+      symbol: bracket.symbol,
+      positionSide: bracket.positionSide,
+      closeSide: bracket.closeSide,
+      quantity: bracket.quantity,
+      entryPrice,
+      stopLossPrice: stopLossPrice || undefined,
+      takeProfitPrice: takeProfitPrice || undefined,
+      count: bracketOrders.length,
+      response: bracketOrders
+    });
+    return bracketOrders;
   }
 
   if (stopLossPrice > 0) {
@@ -667,6 +1037,20 @@ async function placeBracketOrders(adapter, bracket, entryPrice) {
       strategyType: "TAKE_PROFIT_MARKET",
       stopPrice: takeProfitPrice
     }));
+  }
+
+  if (placed.length) {
+    auditOrderEvent("order.bracket", {
+      symbol: bracket.symbol,
+      positionSide: bracket.positionSide,
+      closeSide: bracket.closeSide,
+      quantity: bracket.quantity,
+      entryPrice,
+      stopLossPrice: stopLossPrice || undefined,
+      takeProfitPrice: takeProfitPrice || undefined,
+      count: placed.length,
+      response: placed
+    });
   }
 
   return placed;
@@ -707,18 +1091,40 @@ async function watchFillThenPlaceBracket(adapter, order, bracket) {
         orderId: order.orderId,
         status: status.status
       });
+      auditOrderEvent("order.bracket.watch", {
+        symbol: bracket.symbol,
+        orderId: order.orderId,
+        outcome: "stopped-before-fill",
+        status: status.status
+      }, { severity: "warn" });
       return;
     }
   }
   log("warn", "Bracket watcher timed out", { symbol: bracket.symbol, orderId: order.orderId });
+  auditOrderEvent("order.bracket.watch", {
+    symbol: bracket.symbol,
+    orderId: order.orderId,
+    outcome: "timed-out"
+  }, { severity: "warn" });
 }
 
-async function completeChaseFill(adapter, job, orderStatus, source = "poll") {
-  if (!job || job.status !== "running") return false;
-  job.status = "filled";
-  job.updatedAt = new Date().toISOString();
+async function completeChaseFill(
+  adapter,
+  job,
+  orderStatus,
+  source = "poll",
+  terminalReason = CHASE_TERMINAL_REASONS.FILLED
+) {
+  if (!job || job.status !== CHASE_JOB_STATES.RUNNING) return false;
+  updateChaseFillProgress(job, orderStatus, source);
+  setChaseTerminal(job, CHASE_JOB_STATES.FILLED, terminalReason, source);
   job.filledAt = job.updatedAt;
   job.fillSource = source;
+  job.fillStatus = CHASE_FILL_STATES.FILLED;
+  job.remainingQuantity = "0";
+  if (!Number(job.executedQuantity || 0)) {
+    job.executedQuantity = formatChaseQuantity(job.originalQuantity || job.quantity);
+  }
 
   const entryPrice = Number(orderStatus.avgPrice || orderStatus.price || job.lastPrice);
   const placed = await placeBracketOrders(adapter, job.bracket, entryPrice);
@@ -727,6 +1133,25 @@ async function completeChaseFill(adapter, job, orderStatus, source = "poll") {
     symbol: job.symbol,
     source,
     orderId: job.orderId
+  });
+  auditOrderEvent("order.fill", {
+    jobId: job.id,
+    symbol: job.symbol,
+    source,
+    orderId: job.orderId,
+    status: orderStatus.status,
+    avgPrice: orderStatus.avgPrice,
+    price: orderStatus.price,
+    executedQty: orderStatus.executedQty,
+    response: orderStatus
+  });
+  auditOrderEvent("order.chase.fill", {
+    jobId: job.id,
+    symbol: job.symbol,
+    source,
+    orderId: job.orderId,
+    entryPrice,
+    bracketOrders: placed.length
   });
 
   if (placed.length) {
@@ -878,14 +1303,27 @@ function jobSnapshot(job) {
       quantity: job.reverseOpen.payload.quantity
     } : null,
     status: job.status,
+    state: job.status,
+    isTerminal: isTerminalChaseStatus(job.status),
+    terminalReason: job.terminalReason || CHASE_TERMINAL_REASONS.NONE,
+    terminalReasonDetail: job.terminalReasonDetail || "",
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
+    completedAt: job.completedAt || "",
     iterations: job.iterations,
+    originalQuantity: job.originalQuantity || job.quantity,
+    remainingQuantity: job.remainingQuantity || job.quantity,
+    executedQuantity: job.executedQuantity || "0",
+    fillStatus: job.fillStatus || CHASE_FILL_STATES.NONE,
+    partialFillCount: job.partialFillCount || 0,
+    lastFillAt: job.lastFillAt || "",
     lastPrice: job.lastPrice,
     marketSource: job.marketSource || "",
     pendingPrice: job.pendingPrice || "",
     nextReplaceAt: job.nextReplaceAt ? new Date(job.nextReplaceAt).toISOString() : "",
     lastWakeSource: job.lastWakeSource || "",
+    lastOrderStatus: job.lastOrderStatus || "",
+    lastPrivateOrderUpdateAt: job.lastPrivateOrderUpdateAt || "",
     replaceStrategy: job.replaceStrategy || "cancel-replace",
     replaceCount: job.replaceCount || 0,
     lastReplaceSentAt: job.lastReplaceSentAt || "",
@@ -895,14 +1333,23 @@ function jobSnapshot(job) {
     orderOpsPerReplace: job.orderOpsPerReplace || CHASE_ORDER_OPS_PER_REPLACE,
     rateLimitWindowMs: job.rateLimitWindowMs || 10_000,
     rateGateWaitMs: job.rateGateWaitMs || 0,
+    lastRateGateWaitMs: job.lastRateGateWaitMs || 0,
+    rateGateStartedAt: job.rateGateStartedAt || "",
+    rateGateReleasedAt: job.rateGateReleasedAt || "",
     restFallbackUpdateMs: job.restFallbackUpdateMs || job.updateMs,
     statusCheckMs: job.statusCheckMs || 1000,
     statusPollWithPrivateStream: job.statusPollWithPrivateStream !== false,
     statusSource: job.statusSource || "",
     fillSource: job.fillSource || "",
     filledAt: job.filledAt || "",
+    stopRequestedAt: job.stopRequestedAt || "",
+    cancelOrderError: job.cancelOrderError || "",
     orderId: job.orderId,
     error: job.error || "",
+    lastError: job.lastError || job.error || "",
+    retryCount: job.retryCount || 0,
+    totalRetries: job.totalRetries || 0,
+    terminalReason: job.terminalReason || "",
     backoffMs: job.backoffMs || 0,
     mode: job.mode
   };
@@ -921,7 +1368,7 @@ function clampChaseInterval(value, minUpdateMs = CHASE_MIN_UPDATE_MS) {
 }
 
 function runningChaseJobCount() {
-  return Math.max(1, Array.from(state.chaseJobs.values()).filter((job) => job.status === "running").length);
+  return Math.max(1, Array.from(state.chaseJobs.values()).filter((job) => job.status === CHASE_JOB_STATES.RUNNING).length);
 }
 
 function chaseRateLimitWindowCapacity(job) {
@@ -980,7 +1427,7 @@ async function waitForChaseOrderSlot(job, ops = 1) {
     });
   }
 
-  while (job.status === "running") {
+  while (job.status === CHASE_JOB_STATES.RUNNING) {
     const nowMs = Date.now();
     const timestamps = state.orderRateLimit.get(key) || [];
     while (timestamps.length && nowMs - timestamps[0] >= windowMs) {
@@ -998,12 +1445,16 @@ async function waitForChaseOrderSlot(job, ops = 1) {
 
     const delayMs = Math.max(1, windowMs - (nowMs - timestamps[0]));
     job.rateGateWaitMs = delayMs;
+    job.lastRateGateWaitMs = delayMs;
+    job.rateGateStartedAt = new Date(nowMs).toISOString();
     state.orderRateLimit.set(key, timestamps);
     await wait(delayMs);
+    job.rateGateReleasedAt = new Date().toISOString();
   }
 
   throw new ExchangeError("Pegged limit job stopped before an order-rate slot opened", {
-    stopped: true
+    stopped: true,
+    terminalReason: CHASE_TERMINAL_REASONS.STOPPED_DURING_RATE_WAIT
   });
 }
 
@@ -1022,36 +1473,128 @@ async function sendTimedOrderMutation(job, ops, action) {
   };
 }
 
+function completedMutationResult(job, strategy) {
+  const nowMs = Date.now();
+  return {
+    order: { orderId: job.orderId, status: job.lastOrderStatus || "FILLED" },
+    strategy,
+    telemetry: {
+      sentAt: nowMs,
+      ackAt: nowMs,
+      latencyMs: 0,
+      totalMs: 0
+    },
+    completed: true
+  };
+}
+
+function explicitCancelFailure(result) {
+  return result && Object.prototype.hasOwnProperty.call(result, "canceled") && result.canceled === false;
+}
+
+function chaseMutationError(error, terminalReason) {
+  if (error instanceof ExchangeError) {
+    return new ExchangeError(error.message, {
+      ...error.details,
+      terminalReason: error.details?.terminalReason || terminalReason
+    });
+  }
+  return new ExchangeError(error?.message || "Chase order mutation failed", { terminalReason });
+}
+
+async function reconcileChaseMutationFailure(adapter, job, source) {
+  if (!job.orderId) return { completed: false, fillState: CHASE_FILL_STATES.NONE };
+  try {
+    const orderStatus = await adapter.queryOrder(context(), { symbol: job.symbol, orderId: job.orderId });
+    const fillState = updateChaseFillProgress(job, orderStatus, `${source}-query`);
+    if (fillState === CHASE_FILL_STATES.FILLED || isFilledOrderStatus(orderStatus.status)) {
+      await completeChaseFill(
+        adapter,
+        job,
+        orderStatus,
+        source,
+        CHASE_TERMINAL_REASONS.REPLACE_RACE_FILLED
+      );
+      return { completed: true, fillState: CHASE_FILL_STATES.FILLED };
+    }
+    return { completed: false, fillState };
+  } catch (queryError) {
+    job.statusSource = `${source}-query-failed`;
+    return { completed: false, fillState: CHASE_FILL_STATES.NONE, queryError };
+  }
+}
+
 async function submitChaseLimitOrder(adapter, job, targetPrice) {
+  const remainingQuantity = currentChaseOrderQuantity(job);
+  if (Number(remainingQuantity) <= 0) {
+    await completeChaseFill(
+      adapter,
+      job,
+      { orderId: job.orderId, status: "FILLED", executedQty: job.originalQuantity, price: job.lastPrice },
+      "quantity-reconcile",
+      CHASE_TERMINAL_REASONS.FILLED
+    );
+    return completedMutationResult(job, "quantity-reconcile");
+  }
+
   const orderPayload = {
     symbol: job.symbol,
     side: job.side,
     positionSide: job.apiPositionSide,
     reduceOnly: job.reduceOnly,
-    quantity: job.quantity,
+    quantity: remainingQuantity,
     price: targetPrice,
     timeInForce: job.postOnly ? "GTX" : "GTC"
   };
 
-  if (job.orderId && adapter.replaceLimitOrder) {
-    const timed = await sendTimedOrderMutation(job, 1, () => (
-      adapter.replaceLimitOrder(context(), {
-        ...orderPayload,
-        orderId: job.orderId
-      })
-    ));
-    return { order: timed.result, strategy: "edit-order", telemetry: timed };
+  if (job.orderId && adapter.replaceLimitOrder && job.fillStatus !== CHASE_FILL_STATES.PARTIAL) {
+    try {
+      const timed = await sendTimedOrderMutation(job, 1, () => (
+        adapter.replaceLimitOrder(context(), {
+          ...orderPayload,
+          orderId: job.orderId
+        })
+      ));
+      return { order: timed.result, strategy: "edit-order", telemetry: timed };
+    } catch (error) {
+      const reconciled = await reconcileChaseMutationFailure(adapter, job, "replace-race");
+      if (reconciled.completed) return completedMutationResult(job, "replace-race-filled");
+      throw chaseMutationError(error, CHASE_TERMINAL_REASONS.REPLACE_FAILED);
+    }
   }
 
   if (job.orderId) {
     const requestedAt = Date.now();
-    const cancelTimed = await sendTimedOrderMutation(job, 1, () => (
-      adapter.cancelOrder(context(), { symbol: job.symbol, orderId: job.orderId })
-    ));
+    let cancelTimed;
+    try {
+      cancelTimed = await sendTimedOrderMutation(job, 1, () => (
+        adapter.cancelOrder(context(), { symbol: job.symbol, orderId: job.orderId })
+      ));
+    } catch (error) {
+      const reconciled = await reconcileChaseMutationFailure(adapter, job, "cancel-race");
+      if (reconciled.completed) return completedMutationResult(job, "cancel-race-filled");
+      throw chaseMutationError(error, CHASE_TERMINAL_REASONS.CANCEL_FAILED);
+    }
+    auditOrderEvent("order.cancel", {
+      jobId: job.id,
+      symbol: job.symbol,
+      orderId: job.orderId,
+      reason: "chase-cancel-replace",
+      response: cancelTimed.result
+    });
+    if (explicitCancelFailure(cancelTimed.result)) {
+      const reconciled = await reconcileChaseMutationFailure(adapter, job, "cancel-race");
+      if (reconciled.completed) return completedMutationResult(job, "cancel-race-filled");
+      throw new ExchangeError("Exchange did not confirm chase order cancellation", {
+        terminalReason: CHASE_TERMINAL_REASONS.CANCEL_FAILED,
+        cancelResult: cancelTimed.result
+      });
+    }
     const placeTimed = await sendTimedOrderMutation(job, 1, () => adapter.placeLimitOrder(context(), orderPayload));
     return {
       order: placeTimed.result,
       strategy: "cancel-replace",
+      canceled: cancelTimed.result,
       telemetry: {
         sentAt: cancelTimed.sentAt,
         ackAt: placeTimed.ackAt,
@@ -1078,9 +1621,16 @@ async function waitForChaseWake(adapter, job, wsDriven, timeoutMs) {
 }
 
 async function applyChaseReplace(adapter, job, targetPrice, marketSource, effectiveIntervalMs) {
-  const { order, strategy, telemetry } = await submitChaseLimitOrder(adapter, job, targetPrice);
+  requireLiveRiskOrder("Pegged limit order", {
+    symbol: job.symbol,
+    leverage: job.leverage,
+    quantity: job.quantity
+  }, job, targetPrice);
+  const { order, strategy, canceled, telemetry, completed } = await submitChaseLimitOrder(adapter, job, targetPrice);
+  if (completed) return order;
   job.orderId = order.orderId || job.orderId;
   job.replaceStrategy = strategy;
+  if (order.status) job.lastOrderStatus = chaseOrderStatus(order.status);
   rememberOrderIntent(order, job);
   job.lastPrice = targetPrice;
   job.pendingPrice = "";
@@ -1098,6 +1648,33 @@ async function applyChaseReplace(adapter, job, targetPrice, marketSource, effect
     targetPrice,
     strategy,
     marketSource,
+    ackMs: telemetry.latencyMs,
+    totalMs: telemetry.totalMs,
+    gateMs: job.rateGateWaitMs,
+    intervalMs: effectiveIntervalMs
+  });
+  auditOrderEvent(strategy === "place" ? "order.submit" : "order.replace", {
+    jobId: job.id,
+    orderType: "CHASE_LIMIT",
+    symbol: job.symbol,
+    orderId: job.orderId,
+    side: job.side,
+    quantity: job.quantity,
+    targetPrice,
+    strategy,
+    marketSource,
+    canceled,
+    response: order,
+    telemetry
+  });
+  auditOrderEvent("order.chase.replace", {
+    jobId: job.id,
+    symbol: job.symbol,
+    orderId: job.orderId,
+    targetPrice,
+    strategy,
+    marketSource,
+    replaceCount: job.replaceCount,
     ackMs: telemetry.latencyMs,
     totalMs: telemetry.totalMs,
     gateMs: job.rateGateWaitMs,
@@ -1173,16 +1750,18 @@ function parseWsPayload(raw) {
 }
 
 function sendWsJson(ws, payload) {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  const openState = globalThis.WebSocket?.OPEN ?? 1;
+  if (!ws || ws.readyState !== openState) return false;
   ws.send(JSON.stringify(payload));
   return true;
 }
 
 function privateAccountStreamActive() {
+  const openState = globalThis.WebSocket?.OPEN ?? 1;
   return (
     ACCOUNT_STREAM_ENABLED &&
     state.accountStream.status === "connected" &&
-    state.accountStream.ws?.readyState === WebSocket.OPEN
+    state.accountStream.ws?.readyState === openState
   );
 }
 
@@ -1194,7 +1773,7 @@ function privateStreamEventTime(payload, data) {
 function findRunningChaseJobForOrderUpdate(update) {
   if (!update?.orderId) return null;
   return Array.from(state.chaseJobs.values()).find((job) => (
-    job.status === "running" &&
+    job.status === CHASE_JOB_STATES.RUNNING &&
     String(job.orderId) === String(update.orderId) &&
     (!update.symbol || job.symbol === update.symbol)
   )) || null;
@@ -1204,13 +1783,86 @@ async function handlePrivateOrderUpdate(payload, source) {
   const update = extractPrivateOrderUpdate(payload);
   if (!update) return;
   const job = findRunningChaseJobForOrderUpdate(update);
-  if (!job) return;
-  job.statusSource = source;
+  const auditPayload = {
+    source,
+    symbol: update.symbol,
+    orderId: update.orderId,
+    status: update.status,
+    avgPrice: update.avgPrice,
+    price: update.price,
+    executedQty: update.executedQty
+  };
 
-  if (update.status === "FILLED") {
+  if (!job) {
+    if (isFilledOrderStatus(update.status)) {
+      auditOrderEvent("order.fill", auditPayload);
+    } else {
+      auditOrderEvent("order.update", {
+        ...auditPayload,
+        jobId: ""
+      });
+    }
+    return;
+  }
+
+  job.statusSource = source;
+  job.lastPrivateOrderUpdateAt = new Date().toISOString();
+  const fillState = updateChaseFillProgress(job, update, source);
+
+  if (fillState === CHASE_FILL_STATES.FILLED || isFilledOrderStatus(update.status)) {
+    auditOrderEvent("order.fill", {
+      ...auditPayload,
+      jobId: job.id
+    });
     const adapter = getExchange(state.exchangeId);
     await completeChaseFill(adapter, job, update, source);
+    return;
   }
+
+  auditOrderEvent("order.update", {
+    ...auditPayload,
+    jobId: job.id
+  });
+
+  if (["CANCELED", "EXPIRED", "REJECTED"].includes(update.status)) {
+    auditOrderEvent("order.chase.transition", {
+      jobId: job.id,
+      symbol: update.symbol,
+      orderId: update.orderId,
+      status: update.status,
+      source
+    }, { severity: "warn" });
+  }
+}
+
+function chaseRestStatusPollSource(job) {
+  if (job.statusPollWithPrivateStream) return "rest-poll";
+  if (!privateAccountStreamActive()) return "rest-poll:no-private-ws";
+
+  const staleAfterMs = Math.max(
+    Number(job.statusCheckMs || 1000),
+    Number(job.restFallbackUpdateMs || job.updateMs || 1000)
+  );
+  const lastPrivateOrderUpdateMs = Date.parse(job.lastPrivateOrderUpdateAt || "");
+  if (!Number.isFinite(lastPrivateOrderUpdateMs)) return "rest-poll:missing-private-ws";
+  if (Date.now() - lastPrivateOrderUpdateMs >= staleAfterMs) return "rest-poll:stale-private-ws";
+  return "";
+}
+
+async function maybePollChaseOrderStatus(adapter, job, { force = false } = {}) {
+  if (!job.orderId || job.status !== CHASE_JOB_STATES.RUNNING) return false;
+  const source = chaseRestStatusPollSource(job);
+  if (!source) return false;
+  if (!force && Date.now() - Number(job.lastStatusCheckAt || 0) < Number(job.statusCheckMs || 1000)) return false;
+
+  job.lastStatusCheckAt = Date.now();
+  job.statusSource = source;
+  const orderStatus = await adapter.queryOrder(context(), { symbol: job.symbol, orderId: job.orderId });
+  const fillState = updateChaseFillProgress(job, orderStatus, source);
+  if (fillState === CHASE_FILL_STATES.FILLED || isFilledOrderStatus(orderStatus.status)) {
+    await completeChaseFill(adapter, job, orderStatus, source);
+  }
+  return true;
 }
 
 function sendAccountSubscriptions(ws, subscriptions = []) {
@@ -1356,7 +2008,7 @@ async function runChaseJob(adapter, job) {
   try {
     const symbolInfo = await adapter.getSymbol(context(), job.symbol);
     let transientErrors = 0;
-    while (job.status === "running" && job.iterations < job.maxChases) {
+    while (job.status === CHASE_JOB_STATES.RUNNING && job.iterations < job.maxChases) {
       try {
         const book = await adapter.getOrderBook(context(), { symbol: job.symbol, limit: 5 });
         const marketSource = book.source || "rest";
@@ -1371,6 +2023,8 @@ async function runChaseJob(adapter, job) {
 
         const rawTarget = job.side === "BUY" ? bestBid : bestAsk;
         const targetPrice = adapter.roundPriceForSide(symbolInfo, job.side, rawTarget, job.tickOffset, job.postOnly);
+        await maybePollChaseOrderStatus(adapter, job);
+        if (job.status !== CHASE_JOB_STATES.RUNNING) break;
         const wsDriven = String(marketSource).startsWith("ws");
         const effectiveIntervalMs = wsDriven
           ? rateLimitAdjustedChaseInterval(job)
@@ -1385,26 +2039,19 @@ async function runChaseJob(adapter, job) {
         }
 
         if (shouldReplace) {
+          if (job.orderId) {
+            await maybePollChaseOrderStatus(adapter, job, { force: true });
+            if (job.status !== CHASE_JOB_STATES.RUNNING) break;
+          }
           await applyChaseReplace(adapter, job, targetPrice, marketSource, effectiveIntervalMs);
+          if (job.status !== CHASE_JOB_STATES.RUNNING) break;
         }
 
-        const shouldUseRestStatus = job.statusPollWithPrivateStream || !privateAccountStreamActive();
-        const shouldCheckStatus = (
-          job.orderId &&
-          shouldUseRestStatus &&
-          Date.now() - Number(job.lastStatusCheckAt || 0) >= job.statusCheckMs
-        );
-        if (shouldCheckStatus) {
-          job.lastStatusCheckAt = Date.now();
-          job.statusSource = "rest-poll";
-          const orderStatus = await adapter.queryOrder(context(), { symbol: job.symbol, orderId: job.orderId });
-          if (orderStatus.status === "FILLED") {
-            await completeChaseFill(adapter, job, orderStatus, "rest-poll");
-            break;
-          }
-        }
+        await maybePollChaseOrderStatus(adapter, job);
+        if (job.status !== CHASE_JOB_STATES.RUNNING) break;
 
         transientErrors = 0;
+        job.retryCount = 0;
         job.error = "";
         job.backoffMs = 0;
         job.iterations += 1;
@@ -1430,6 +2077,9 @@ async function runChaseJob(adapter, job) {
         transientErrors += 1;
         const delayMs = retryDelayFor(error, transientErrors, job.updateMs);
         job.error = `Transient exchange response: ${error.message}`;
+        job.lastError = error.message;
+        job.retryCount = transientErrors;
+        job.totalRetries += 1;
         job.backoffMs = delayMs;
         job.updatedAt = new Date().toISOString();
         log("warn", "Pegged limit job backing off", {
@@ -1440,12 +2090,23 @@ async function runChaseJob(adapter, job) {
           delayMs,
           transientErrors
         });
+        auditOrderEvent("order.chase.backoff", {
+          jobId: job.id,
+          symbol: job.symbol,
+          orderId: job.orderId,
+          status: error.details?.status,
+          code: error.details?.code,
+          delayMs,
+          transientErrors,
+          error: auditErrorPayload(error)
+        }, { severity: "warn" });
 
         if (transientErrors >= CHASE_MAX_TRANSIENT_ERRORS) {
           throw new ExchangeError("Pegged limit job stopped after repeated transient exchange responses", {
             lastError: error.message,
             status: error.details?.status,
-            code: error.details?.code
+            code: error.details?.code,
+            terminalReason: CHASE_TERMINAL_REASONS.TRANSIENT_EXHAUSTED
           });
         }
 
@@ -1453,21 +2114,52 @@ async function runChaseJob(adapter, job) {
       }
     }
 
-    if (job.status === "running") {
-      job.status = "done";
-      job.updatedAt = new Date().toISOString();
+    if (job.status === CHASE_JOB_STATES.RUNNING) {
+      setChaseTerminal(job, CHASE_JOB_STATES.DONE, CHASE_TERMINAL_REASONS.MAX_REPLACES);
       log("info", "Pegged limit job finished", { jobId: job.id, symbol: job.symbol, iterations: job.iterations });
+      auditOrderEvent("order.chase.done", {
+        jobId: job.id,
+        symbol: job.symbol,
+        orderId: job.orderId,
+        iterations: job.iterations,
+        status: job.status
+      });
     }
   } catch (error) {
-    if (error.details?.stopped && job.status !== "running") {
-      if (job.status === "stopping") job.status = "stopped";
-      job.updatedAt = new Date().toISOString();
+    if (error.details?.stopped && job.status !== CHASE_JOB_STATES.RUNNING) {
+      if (job.status === CHASE_JOB_STATES.STOPPING) {
+        setChaseTerminal(
+          job,
+          CHASE_JOB_STATES.STOPPED,
+          error.details?.terminalReason || CHASE_TERMINAL_REASONS.STOPPED_DURING_RATE_WAIT
+        );
+      } else {
+        job.updatedAt = new Date().toISOString();
+      }
+      auditOrderEvent("order.chase.stop", {
+        jobId: job.id,
+        symbol: job.symbol,
+        orderId: job.orderId,
+        status: job.status,
+        reason: error.message
+      }, { severity: "warn" });
       return;
     }
-    job.status = "error";
+    setChaseTerminal(
+      job,
+      CHASE_JOB_STATES.ERROR,
+      error.details?.terminalReason || CHASE_TERMINAL_REASONS.EXCHANGE_ERROR,
+      error.message
+    );
     job.error = error.message;
-    job.updatedAt = new Date().toISOString();
+    job.lastError = error.message;
     log("error", "Pegged limit job failed", { jobId: job.id, error: error.message });
+    auditOrderEvent("order.chase.error", {
+      jobId: job.id,
+      symbol: job.symbol,
+      orderId: job.orderId,
+      error: auditErrorPayload(error)
+    }, { severity: "error" });
   }
 }
 
@@ -1609,6 +2301,8 @@ async function handleApi(req, res, pathname, searchParams) {
   if (req.method === "POST" && pathname === "/api/trade/leverage") {
     requireLiveGuard("Set leverage");
     const body = await readBody(req);
+    requireLiveRiskSymbol("Set leverage", body.symbol);
+    requireLiveRiskLeverage("Set leverage", body.leverage, { required: true });
     const result = await adapter.setLeverage(context(), {
       symbol: body.symbol,
       leverage: Number(body.leverage)
@@ -1623,6 +2317,8 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     const intent = buildOrderIntent(body);
     const bracket = buildBracketConfig(body, intent);
+    requireLiveRiskOrder("Limit order", body, intent, body.price);
+    if (bracket) requireLiveRiskSymbol("Bracket order", bracket.symbol);
     if (body.leverage) {
       await adapter.setLeverage(context(), { symbol: body.symbol, leverage: Number(body.leverage) });
     }
@@ -1634,6 +2330,19 @@ async function handleApi(req, res, pathname, searchParams) {
       timeInForce: ORDER_POST_ONLY ? "GTX" : "GTC"
     });
     rememberOrderIntent(result, intent);
+    auditOrderEvent("order.submit", {
+      orderType: "LIMIT",
+      symbol: body.symbol,
+      action: intent.action,
+      positionSide: intent.positionSide,
+      side: intent.side,
+      reduceOnly: intent.reduceOnly,
+      quantity: String(body.quantity),
+      price: body.price,
+      timeInForce: ORDER_POST_ONLY ? "GTX" : "GTC",
+      bracket: Boolean(bracket),
+      response: result
+    });
     if (bracket) {
       watchFillThenPlaceBracket(adapter, result, bracket).catch((error) => {
         log("error", "Bracket watcher failed", {
@@ -1641,6 +2350,13 @@ async function handleApi(req, res, pathname, searchParams) {
           orderId: result.orderId,
           error: error.message
         });
+        auditOrderEvent("order.error", {
+          route: "/api/trade/limit-order",
+          phase: "bracket-watch",
+          symbol: bracket.symbol,
+          orderId: result.orderId,
+          error: auditErrorPayload(error)
+        }, { severity: "error" });
       });
     }
     log("info", "Limit order submitted", {
@@ -1660,6 +2376,11 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     const intent = buildOrderIntent(body);
     const bracket = buildBracketConfig(body, intent);
+    const riskPrice = intent.action === "OPEN"
+      ? await liveRiskMarketPrice(adapter, "Market order", body.symbol)
+      : body.price;
+    requireLiveRiskOrder("Market order", body, intent, riskPrice);
+    if (bracket) requireLiveRiskSymbol("Bracket order", bracket.symbol);
     if (body.leverage) {
       await adapter.setLeverage(context(), { symbol: body.symbol, leverage: Number(body.leverage) });
     }
@@ -1671,6 +2392,17 @@ async function handleApi(req, res, pathname, searchParams) {
       reduceOnly: intent.reduceOnly
     });
     rememberOrderIntent(result, intent);
+    auditOrderEvent("order.submit", {
+      orderType: "MARKET",
+      symbol: body.symbol,
+      action: intent.action,
+      positionSide: intent.positionSide,
+      side: intent.side,
+      reduceOnly: intent.reduceOnly,
+      quantity: String(body.quantity),
+      bracket: Boolean(bracket),
+      response: result
+    }, { severity: "warn" });
     const entryPrice = await filledEntryPrice(adapter, body.symbol, result, body.price);
     const placed = await placeBracketOrders(adapter, bracket, entryPrice);
     log("warn", "FAST market order submitted", {
@@ -1689,7 +2421,14 @@ async function handleApi(req, res, pathname, searchParams) {
   if (req.method === "POST" && pathname === "/api/trade/cancel-all") {
     requireLiveGuard("Cancel all orders");
     const body = await readBody(req);
+    requireLiveConfirm(body, "CANCEL_ALL", "Cancel all orders");
+    requireLiveRiskSymbol("Cancel all orders", body.symbol);
     const result = await adapter.cancelAllOpenOrders(context(), body.symbol);
+    auditOrderEvent("order.cancel", {
+      symbol: body.symbol,
+      reason: "cancel-all",
+      response: result
+    }, { severity: "warn" });
     log("warn", "All open orders canceled", { symbol: body.symbol, mode: state.mode });
     json(res, 200, result);
     return;
@@ -1699,23 +2438,62 @@ async function handleApi(req, res, pathname, searchParams) {
     requireLiveGuard("Emergency close");
     const body = await readBody(req);
     requireConfirm(body, "CLOSE_NOW", "Emergency close");
-    const symbol = body.all ? undefined : body.symbol;
+    const symbol = body.all ? undefined : normalizeRiskSymbol(body.symbol);
+    let positionsForClose = null;
+    const cancelResults = [];
     if (symbol) {
-      await adapter.cancelAllOpenOrders(context(), symbol);
+      requireLiveRiskSymbol("Emergency close", symbol);
+      const response = await adapter.cancelAllOpenOrders(context(), symbol);
+      cancelResults.push({
+        symbol,
+        response
+      });
+      auditOrderEvent("order.cancel", {
+        symbol,
+        reason: "emergency-close",
+        response
+      }, { severity: "error" });
     } else {
       const [positions, openOrders] = await Promise.all([
         adapter.getPositions(context()),
         adapter.getOpenOrders(context())
       ]);
+      positionsForClose = positions;
       const symbolsToCancel = new Set([
         ...positions.map((position) => position.symbol),
         ...openOrders.map((order) => order.symbol)
       ]);
       for (const item of symbolsToCancel) {
-        await adapter.cancelAllOpenOrders(context(), item);
+        requireLiveRiskSymbol("Emergency close", item);
+      }
+      for (const item of symbolsToCancel) {
+        const response = await adapter.cancelAllOpenOrders(context(), item);
+        cancelResults.push({
+          symbol: item,
+          response
+        });
+        auditOrderEvent("order.cancel", {
+          symbol: item,
+          reason: "emergency-close",
+          response
+        }, { severity: "error" });
       }
     }
-    const results = await adapter.closePositions(context(), { symbol });
+    let results = [];
+    if (!symbol && liveRiskHasAllowedSymbols()) {
+      const symbolsToClose = Array.from(new Set((positionsForClose || []).map((position) => position.symbol)));
+      for (const item of symbolsToClose) {
+        results.push(...await adapter.closePositions(context(), { symbol: item }));
+      }
+    } else {
+      results = await adapter.closePositions(context(), { symbol });
+    }
+    auditOrderEvent("order.emergency_close", {
+      symbol: symbol || "ALL",
+      cancelResults,
+      closed: results.length,
+      response: results
+    }, { severity: "error" });
     log("warn", "Emergency close executed", { symbol: symbol || "ALL", closed: results.length, mode: state.mode });
     json(res, 200, { closed: results });
     return;
@@ -1724,8 +2502,10 @@ async function handleApi(req, res, pathname, searchParams) {
   if (req.method === "POST" && pathname === "/api/trade/reverse") {
     requireLiveGuard("Reverse position");
     const body = await readBody(req);
+    requireLiveConfirm(body, "REVERSE_POSITION", "Reverse position");
     const symbol = String(body.symbol || "").toUpperCase();
     if (!symbol) throw new ExchangeError("Reverse requires a symbol");
+    requireLiveRiskSymbol("Reverse position", symbol);
 
     const selectedSide = String(body.positionSide || "LONG").toUpperCase();
     if (!["LONG", "SHORT"].includes(selectedSide)) {
@@ -1742,11 +2522,6 @@ async function handleApi(req, res, pathname, searchParams) {
     if (!quantity) {
       throw new ExchangeError(`No usable ${selectedSide} position quantity to reverse for ${symbol}`);
     }
-
-    if (body.leverage) {
-      await adapter.setLeverage(context(), { symbol, leverage: Number(body.leverage) });
-    }
-    await adapter.cancelAllOpenOrders(context(), symbol);
 
     const closePayload = {
       ...body,
@@ -1766,6 +2541,19 @@ async function handleApi(req, res, pathname, searchParams) {
     };
     const openIntent = buildOrderIntent(openPayload);
     const openBracket = buildBracketConfig(openPayload, openIntent);
+    const reverseRiskPrice = await liveRiskMarketPrice(adapter, "Reverse open leg", symbol);
+    requireLiveRiskOrder("Reverse open leg", openPayload, openIntent, reverseRiskPrice);
+    if (openBracket) requireLiveRiskSymbol("Bracket order", openBracket.symbol);
+
+    if (body.leverage) {
+      await adapter.setLeverage(context(), { symbol, leverage: Number(body.leverage) });
+    }
+    const cancelResult = await adapter.cancelAllOpenOrders(context(), symbol);
+    auditOrderEvent("order.cancel", {
+      symbol,
+      reason: "reverse",
+      response: cancelResult
+    }, { severity: "warn" });
 
     if (String(body.executionMode || "").toUpperCase() === "MARKET") {
       const closeOrder = await adapter.placeMarketOrder(context(), {
@@ -1776,6 +2564,17 @@ async function handleApi(req, res, pathname, searchParams) {
         reduceOnly: closeIntent.reduceOnly
       });
       rememberOrderIntent(closeOrder, closeIntent);
+      auditOrderEvent("order.submit", {
+        orderType: "MARKET",
+        purpose: "reverse-close",
+        symbol,
+        action: closeIntent.action,
+        positionSide: closeIntent.positionSide,
+        side: closeIntent.side,
+        reduceOnly: closeIntent.reduceOnly,
+        quantity: String(quantity),
+        response: closeOrder
+      }, { severity: "warn" });
 
       const openOrder = await adapter.placeMarketOrder(context(), {
         ...openPayload,
@@ -1785,9 +2584,33 @@ async function handleApi(req, res, pathname, searchParams) {
         reduceOnly: openIntent.reduceOnly
       });
       rememberOrderIntent(openOrder, openIntent);
+      auditOrderEvent("order.submit", {
+        orderType: "MARKET",
+        purpose: "reverse-open",
+        symbol,
+        action: openIntent.action,
+        positionSide: openIntent.positionSide,
+        side: openIntent.side,
+        reduceOnly: openIntent.reduceOnly,
+        quantity: String(quantity),
+        bracket: Boolean(openBracket),
+        response: openOrder
+      }, { severity: "warn" });
 
       const entryPrice = await filledEntryPrice(adapter, symbol, openOrder, body.price);
       const placed = await placeBracketOrders(adapter, openBracket, entryPrice);
+      auditOrderEvent("order.reverse", {
+        mode: "MARKET",
+        symbol,
+        from: selectedSide,
+        to: openSide,
+        quantity: String(quantity),
+        closeOrderId: closeOrder.orderId,
+        openOrderId: openOrder.orderId,
+        bracketOrders: placed.length,
+        closed: closeOrder,
+        opened: openOrder
+      }, { severity: "warn" });
       log("warn", "FAST reverse executed", {
         symbol,
         from: selectedSide,
@@ -1817,6 +2640,15 @@ async function handleApi(req, res, pathname, searchParams) {
       }
     }));
 
+    auditOrderEvent("order.reverse", {
+      mode: "CHASE",
+      closeJobId: closeJob.id,
+      symbol,
+      from: selectedSide,
+      to: openSide,
+      quantity: String(quantity),
+      bracket: Boolean(openBracket)
+    }, { severity: "warn" });
     log("warn", "Reverse chase queued", {
       closeJobId: closeJob.id,
       symbol,
@@ -1840,6 +2672,11 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     const intent = buildOrderIntent(body);
     const bracket = buildBracketConfig(body, intent);
+    const chaseRiskPrice = intent.action === "OPEN"
+      ? await liveRiskMarketPrice(adapter, "Pegged limit order", body.symbol)
+      : body.price;
+    requireLiveRiskOrder("Pegged limit order", body, intent, chaseRiskPrice);
+    if (bracket) requireLiveRiskSymbol("Bracket order", bracket.symbol);
     if (body.leverage) {
       await adapter.setLeverage(context(), { symbol: body.symbol, leverage: Number(body.leverage) });
     }
@@ -1852,13 +2689,20 @@ async function handleApi(req, res, pathname, searchParams) {
     const body = await readBody(req);
     const job = state.chaseJobs.get(body.jobId);
     if (!job) throw new ExchangeError("Pegged limit job not found");
-    job.status = "stopping";
-    job.updatedAt = new Date().toISOString();
-    if (body.cancelOrder !== false && job.orderId) {
-      await adapter.cancelOrder(context(), { symbol: job.symbol, orderId: job.orderId });
+    if (body.cancelOrder !== false) {
+      requireLiveGuard("Stop pegged limit order");
+      requireLiveConfirm(body, "STOP_CHASE", "Stop pegged limit order");
+      requireLiveRiskSymbol("Stop pegged limit order", job.symbol);
     }
-    job.status = "stopped";
-    log("warn", "Pegged limit job stopped", { jobId: job.id, symbol: job.symbol });
+    await stopChaseJob(adapter, job, { cancelOrder: body.cancelOrder !== false });
+    auditOrderEvent("order.chase.stop", {
+      jobId: job.id,
+      symbol: job.symbol,
+      orderId: job.orderId,
+      cancelOrder: body.cancelOrder !== false,
+      status: job.status,
+      terminalReason: job.terminalReason || ""
+    }, { severity: "warn" });
     json(res, 200, jobSnapshot(job));
     return;
   }
@@ -1882,6 +2726,14 @@ async function handle(req, res) {
   } catch (error) {
     const status = error instanceof ExchangeError ? 400 : 500;
     log("error", error.message, error.details || {});
+    if (isTradeApiPath(pathname)) {
+      auditOrderEvent("order.error", {
+        method: req.method,
+        path: pathname,
+        status,
+        error: auditErrorPayload(error)
+      }, { severity: status >= 500 ? "error" : "warn" });
+    }
     json(res, status, {
       error: error.message,
       details: error.details || {}
@@ -1889,19 +2741,46 @@ async function handle(req, res) {
   }
 }
 
-const server = http.createServer(handle);
+function startServer() {
+  const server = http.createServer(handle);
 
-logEnvFileDetection();
+  logEnvFileDetection();
 
-server.listen(PORT, "127.0.0.1", () => {
-  log("info", `MemeMax Orderly terminal listening on http://127.0.0.1:${PORT}`, {
-    mode: state.mode,
-    exchangeId: state.exchangeId,
-    hasApiKey: hasActiveApiKey()
+  server.listen(PORT, "127.0.0.1", () => {
+    log("info", `MemeMax Orderly terminal listening on http://127.0.0.1:${PORT}`, {
+      mode: state.mode,
+      exchangeId: state.exchangeId,
+      hasApiKey: hasActiveApiKey()
+    });
+    startAccountUserStream().catch((error) => {
+      state.accountStream.status = "rest-fallback";
+      state.accountStream.lastError = error.message;
+      log("warn", "Account stream unavailable; using REST fallback", { error: error.message });
+    });
   });
-  startAccountUserStream().catch((error) => {
-    state.accountStream.status = "rest-fallback";
-    state.accountStream.lastError = error.message;
-    log("warn", "Account stream unavailable; using REST fallback", { error: error.message });
-  });
-});
+
+  return server;
+}
+
+const isMainModule = process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === __filename.toLowerCase();
+if (isMainModule) {
+  startServer();
+}
+
+export const __test__ = {
+  CHASE_FILL_STATES,
+  CHASE_JOB_STATES,
+  CHASE_TERMINAL_REASONS,
+  buildChaseJob,
+  buildOrderIntent,
+  handlePrivateOrderUpdate,
+  jobSnapshot,
+  maybePollChaseOrderStatus,
+  runChaseJob,
+  startServer,
+  state,
+  stopChaseJob,
+  submitChaseLimitOrder,
+  updateChaseFillProgress,
+  waitForChaseOrderSlot
+};

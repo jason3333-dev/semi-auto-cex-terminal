@@ -195,7 +195,15 @@ internal static class SemiAutoCexTerminalLauncher
         string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(localAppData))
         {
-            localAppData = AppDomain.CurrentDomain.BaseDirectory;
+            string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            if (!string.IsNullOrWhiteSpace(userProfile))
+            {
+                localAppData = Path.Combine(userProfile, "AppData", "Local");
+            }
+        }
+        if (string.IsNullOrWhiteSpace(localAppData))
+        {
+            throw new InvalidOperationException("Local application data path was not available.");
         }
         return Path.Combine(localAppData, "SemiAutoCexTerminal");
     }
@@ -203,7 +211,10 @@ internal static class SemiAutoCexTerminalLauncher
     private static string EnsureSessionEnv(string dataDir, string appRoot)
     {
         string projectSessionEnvPath = Path.Combine(appRoot, ".env.session");
-        if (File.Exists(projectSessionEnvPath)) return projectSessionEnvPath;
+        if (File.Exists(projectSessionEnvPath))
+        {
+            Console.WriteLine("Ignoring app-local .env.session; retail session env is user-local.");
+        }
 
         Directory.CreateDirectory(dataDir);
         string sessionEnvPath = Path.Combine(dataDir, ".env.session");

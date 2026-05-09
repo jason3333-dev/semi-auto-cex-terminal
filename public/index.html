@@ -14,6 +14,7 @@
         <h1>MemeMax Orderly Terminal</h1>
         <div class="status-line">
           <span id="modeBadge" class="badge badge-muted">DRY-RUN</span>
+          <span id="riskBadge" class="badge badge-muted">DRY RUN</span>
           <span id="connectionLabel">연결 대기</span>
         </div>
       </div>
@@ -122,6 +123,7 @@
             </label>
           </div>
           <div id="chaseSummary" class="order-summary">-</div>
+          <div id="operationStatus" class="operation-status hidden" role="status" aria-live="polite"></div>
           <button id="limitOrderButton" class="primary" type="button">지정가 주문</button>
           <button id="stopChaseButton" type="button">추격 주문 중지</button>
         </section>

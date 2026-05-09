@@ -38,6 +38,8 @@ PowerShell 런처:
 
 브라우저에서 `http://127.0.0.1:8787`을 엽니다.
 
+Dry-run smoke와 testnet 준비 절차는 [docs/validation.md](docs/validation.md)에 정리되어 있습니다. `live` 모드는 dry-run/testnet 검증 후에만 사용하고, 영구 live 설정에는 반드시 `LIVE_UNLOCK_PHRASE=I_ACCEPT_LIVE_RISK`가 필요합니다.
+
 ## 실행 파일
 
 ```powershell
@@ -65,6 +67,25 @@ dist\retail\SemiAutoCexTerminal-win-x64.zip
 ```text
 %LOCALAPPDATA%\SemiAutoCexTerminal\.env.session
 ```
+
+## Order audit logs
+
+Order lifecycle audit events are appended as UTF-8 JSONL here by default:
+
+```text
+%LOCALAPPDATA%\SemiAutoCexTerminal\logs\order-audit.jsonl
+```
+
+Each line is one JSON object. The log records submit, replace, cancel, bracket,
+reverse, emergency close, chase transition, fill, and error events with API keys,
+account ids, signatures, private keys, credentials, and raw session config
+redacted before writing. To use a different local path, set
+`ORDER_AUDIT_LOG_PATH` in `.env.session`.
+
+To clear the audit log, stop the terminal and delete either
+`%LOCALAPPDATA%\SemiAutoCexTerminal\logs\order-audit.jsonl` or the whole
+`%LOCALAPPDATA%\SemiAutoCexTerminal\logs\` directory. Do not commit or share
+audit logs; they are local runtime data.
 
 첫 실행 시 `app\.env.session.example`을 기반으로 dry-run 템플릿을 만듭니다. 패키지에는 실제 `.env.session`, API 키, 로그, 디버그 이미지, 빌드 산출물이 포함되지 않습니다.
 
@@ -108,6 +129,10 @@ CHASE_POST_ONLY=true
 CHASE_TICK_OFFSET=0
 CHASE_MAX_REPLACES=240
 
+LIVE_MAX_NOTIONAL=100
+LIVE_MAX_LEVERAGE=10
+# LIVE_ALLOWED_SYMBOLS=BTCUSDC,ETHUSDC
+
 ACCOUNT_REFRESH_MS=1000
 ACCOUNT_STREAM_ENABLED=true
 ACCOUNT_STREAM_KEEPALIVE_MS=3000000
@@ -147,4 +172,4 @@ CHART_VWAP_PERIOD=80
 
 ## 안전 메모
 
-이 도구는 매매 판단을 대신하지 않습니다. 네트워크 지연, API 제한, 부분 체결, Orderly 계정 상태, 포지션 모드, 거래소 장애로 인해 UI와 실제 주문 상태가 어긋날 수 있습니다. 큰 금액을 넣기 전에 `dry-run`과 소액으로 반드시 검증하세요.
+이 도구는 매매 판단을 대신하지 않습니다. 네트워크 지연, API 제한, 부분 체결, Orderly 계정 상태, 포지션 모드, 거래소 장애로 인해 UI와 실제 주문 상태가 어긋날 수 있습니다. 큰 금액을 넣기 전에 [dry-run/testnet validation](docs/validation.md)을 먼저 통과하세요.

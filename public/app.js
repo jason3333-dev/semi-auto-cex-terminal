@@ -4,6 +4,7 @@ const FIFTEEN_SECONDS_MS = 15_000;
 
 const ui = {
   modeBadge: $("#modeBadge"),
+  riskBadge: $("#riskBadge"),
   connectionLabel: $("#connectionLabel"),
   refreshButton: $("#refreshButton"),
   symbolInput: $("#symbolInput"),
@@ -36,6 +37,7 @@ const ui = {
   autoChaseInput: $("#autoChaseInput"),
   fastModeInput: $("#fastModeInput"),
   chaseSummary: $("#chaseSummary"),
+  operationStatus: $("#operationStatus"),
   stopChaseButton: $("#stopChaseButton"),
   closeAllInput: $("#closeAllInput"),
   cancelAllButton: $("#cancelAllButton"),
@@ -73,8 +75,92 @@ const app = {
   priceTimer: null,
   chartPointer: null,
   symbolApplyTimer: null,
-  marketRequestSeq: 0
+  marketRequestSeq: 0,
+  hasRunningChaseJob: false,
+  pendingActions: new Set(),
+  operationStatusTimer: null
 };
+
+const ACTION_COPY = {
+  limitOrder: {
+    title: "ORDER",
+    idle: "지정가 주문",
+    pending: "지정가 전송 중"
+  },
+  marketOrder: {
+    title: "FAST",
+    idle: "FAST 주문",
+    pending: "FAST 전송 중"
+  },
+  chaseStart: {
+    title: "CHASE START",
+    idle: "추격 지정가 시작",
+    pending: "추격 시작 중"
+  },
+  chaseStop: {
+    title: "CHASE STOP",
+    idle: "추격 주문 중지",
+    pending: "추격 중지 중"
+  },
+  reverse: {
+    title: "REVERSE",
+    idle: "리버스",
+    pending: "리버스 실행 중"
+  },
+  cancel: {
+    title: "CANCEL",
+    idle: "오픈오더 취소",
+    pending: "취소 중"
+  },
+  emergency: {
+    title: "EMERGENCY",
+    idle: "포지션 정리",
+    pending: "정리 중"
+  }
+};
+
+const SUBMIT_ACTION_KEYS = ["limitOrder", "marketOrder", "chaseStart"];
+const TERMINAL_JOB_STATUSES = new Set(["done", "filled", "stopped", "error", "canceled", "cancelled", "expired", "rejected"]);
+
+function compactText(value, maxLength = 180) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 1)).trim()}…`;
+}
+
+function serverFailureMessage(payload = {}, fallbackStatus = "") {
+  const details = payload && typeof payload.details === "object" && payload.details
+    ? payload.details
+    : {};
+  const detailReason = compactText(
+    details.reason ||
+    details.message ||
+    details.msg ||
+    details.error ||
+    details.lastError ||
+    "",
+    120
+  );
+  const primaryReason = compactText(payload.error || payload.reason || payload.message || detailReason || "Request failed");
+  const hasDistinctDetail = detailReason &&
+    detailReason.toLowerCase() !== primaryReason.toLowerCase() &&
+    !primaryReason.toLowerCase().includes(detailReason.toLowerCase());
+  const reason = hasDistinctDetail ? `${primaryReason}: ${detailReason}` : primaryReason;
+  const tags = [];
+  if (details.code !== undefined && details.code !== null && details.code !== "") {
+    tags.push(`code ${details.code}`);
+  }
+  const status = details.status || fallbackStatus;
+  if (status) tags.push(`HTTP ${status}`);
+  return tags.length ? `${reason} (${tags.join(", ")})` : reason;
+}
+
+function createRequestError(payload, status) {
+  const error = new Error(serverFailureMessage(payload, status));
+  error.details = payload?.details || {};
+  error.serverError = payload?.error || "";
+  return error;
+}
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
@@ -83,9 +169,14 @@ async function request(path, options = {}) {
     },
     ...options
   });
-  const payload = await response.json();
+  let payload = {};
+  try {
+    payload = await response.json();
+  } catch {
+    payload = {};
+  }
   if (!response.ok) {
-    throw new Error(payload.error || "Request failed");
+    throw createRequestError(payload, response.status);
   }
   return payload;
 }
@@ -362,11 +453,7 @@ function updateChaseSummary() {
     updateMs: 4000,
     maxReplaces: 25
   };
-  ui.limitPriceInput.disabled = fastMode;
-  ui.limitOrderButton.textContent = fastMode ? "FAST 주문" : autoChase ? "추격 지정가 시작" : "지정가 주문";
-  if (ui.reverseButton) {
-    ui.reverseButton.textContent = `${fastMode ? "FAST " : ""}리버스 ${app.selectedIntent} -> ${oppositeIntent(app.selectedIntent)}`;
-  }
+  ui.limitPriceInput.disabled = fastMode || hasPendingAction();
   ui.chaseSummary.textContent = fastMode
     ? [
       currentSymbol(),
@@ -403,8 +490,13 @@ function updateChaseSummary() {
   if (sl || tp) {
     ui.chaseSummary.textContent += ` ${sl ? `SL ${ui.stopLossAmountInput.value}->${sl}` : ""}${tp ? ` TP ${ui.takeProfitAmountInput.value}->${tp}` : ""}`;
   }
+  const liveRisk = app.session?.mode === "live" ? app.session.liveRisk : null;
+  if (liveRisk) {
+    ui.chaseSummary.textContent += ` guard <=${formatNumber(liveRisk.maxNotional, 0)} / ${liveRisk.maxLeverage}x`;
+  }
   updatePositionSize();
   updateLeverageDisplay();
+  updateActionControls();
 }
 
 function toast(message, isError = false) {
@@ -412,20 +504,151 @@ function toast(message, isError = false) {
   ui.toast.classList.toggle("negative", isError);
   ui.toast.classList.remove("hidden");
   window.clearTimeout(toast.timer);
-  toast.timer = window.setTimeout(() => ui.toast.classList.add("hidden"), 2800);
+  toast.timer = window.setTimeout(() => ui.toast.classList.add("hidden"), isError ? 6500 : 2800);
+}
+
+function currentSubmitActionKey() {
+  if (ui.fastModeInput.checked) return "marketOrder";
+  if (ui.autoChaseInput.checked) return "chaseStart";
+  return "limitOrder";
+}
+
+function hasPendingAction() {
+  return app.pendingActions.size > 0;
+}
+
+function pendingSubmitActionKey() {
+  return SUBMIT_ACTION_KEYS.find((key) => app.pendingActions.has(key)) || "";
+}
+
+function setOperationStatus(message, tone = "info", { autoHide = false } = {}) {
+  if (!ui.operationStatus) return;
+  window.clearTimeout(app.operationStatusTimer);
+  ui.operationStatus.textContent = message;
+  ui.operationStatus.className = `operation-status ${tone}`;
+  ui.operationStatus.classList.remove("hidden");
+  if (autoHide) {
+    app.operationStatusTimer = window.setTimeout(() => {
+      ui.operationStatus.classList.add("hidden");
+    }, 4500);
+  }
+}
+
+function updateButtonPendingState(button, label, disabled, pending) {
+  if (!button) return;
+  button.textContent = label;
+  button.disabled = disabled;
+  button.classList.toggle("pending", pending);
+  if (pending) {
+    button.setAttribute("aria-busy", "true");
+  } else {
+    button.removeAttribute("aria-busy");
+  }
+}
+
+function reverseButtonLabel() {
+  return `${ui.fastModeInput.checked ? "FAST " : ""}리버스 ${app.selectedIntent} -> ${oppositeIntent(app.selectedIntent)}`;
+}
+
+function updateActionControls() {
+  const busy = hasPendingAction();
+  const submitKey = currentSubmitActionKey();
+  const pendingSubmit = pendingSubmitActionKey();
+  updateButtonPendingState(
+    ui.limitOrderButton,
+    pendingSubmit ? ACTION_COPY[pendingSubmit].pending : ACTION_COPY[submitKey].idle,
+    busy,
+    Boolean(pendingSubmit)
+  );
+  updateButtonPendingState(
+    ui.stopChaseButton,
+    app.pendingActions.has("chaseStop") ? ACTION_COPY.chaseStop.pending : ACTION_COPY.chaseStop.idle,
+    busy || !app.hasRunningChaseJob,
+    app.pendingActions.has("chaseStop")
+  );
+  updateButtonPendingState(
+    ui.reverseButton,
+    app.pendingActions.has("reverse") ? ACTION_COPY.reverse.pending : reverseButtonLabel(),
+    busy,
+    app.pendingActions.has("reverse")
+  );
+  updateButtonPendingState(
+    ui.cancelAllButton,
+    app.pendingActions.has("cancel") ? ACTION_COPY.cancel.pending : ACTION_COPY.cancel.idle,
+    busy,
+    app.pendingActions.has("cancel")
+  );
+  updateButtonPendingState(
+    ui.emergencyButton,
+    app.pendingActions.has("emergency") ? ACTION_COPY.emergency.pending : ACTION_COPY.emergency.idle,
+    busy,
+    app.pendingActions.has("emergency")
+  );
+  ui.limitPriceInput.disabled = ui.fastModeInput.checked || busy;
+}
+
+function beginAction(actionKey) {
+  app.pendingActions.add(actionKey);
+  setOperationStatus(`${ACTION_COPY[actionKey].title} pending`, "pending");
+  updateActionControls();
+  return () => {
+    app.pendingActions.delete(actionKey);
+    updateActionControls();
+  };
+}
+
+async function runTradeAction(actionKey, task) {
+  if (hasPendingAction()) return null;
+  const release = beginAction(actionKey);
+  try {
+    const result = await task();
+    setOperationStatus(`${ACTION_COPY[actionKey].title} ok`, "positive", { autoHide: true });
+    return result;
+  } catch (error) {
+    const message = `${ACTION_COPY[actionKey].title} failed: ${error.message}`;
+    setOperationStatus(message, "negative");
+    toast(message, true);
+    return null;
+  } finally {
+    release();
+  }
 }
 
 function setModeBadge(mode) {
-  ui.modeBadge.textContent = mode.toUpperCase();
+  ui.modeBadge.textContent = mode === "dry-run" ? "DRY RUN" : mode.toUpperCase();
   ui.modeBadge.className = "badge";
   if (mode === "live") ui.modeBadge.classList.add("badge-live");
   else if (mode === "testnet") ui.modeBadge.classList.add("badge-testnet");
   else ui.modeBadge.classList.add("badge-muted");
 }
 
+function liveAllowedSymbols() {
+  const risk = app.session?.liveRisk;
+  return app.session?.mode === "live" && risk?.allowedSymbolsConfigured
+    ? risk.allowedSymbols || []
+    : [];
+}
+
+function renderRiskBadge(session) {
+  if (!ui.riskBadge) return;
+  const risk = session.liveRisk || {};
+  ui.riskBadge.className = "badge";
+  if (session.mode === "live") {
+    ui.riskBadge.classList.add("badge-live");
+    ui.riskBadge.textContent = `GUARDS ${formatNumber(risk.maxNotional, 0)} / ${risk.maxLeverage}x`;
+    const symbolText = risk.allowedSymbolsConfigured ? risk.allowedSymbols.join(", ") : "all symbols";
+    ui.riskBadge.title = `Live guardrails: max notional ${formatNumber(risk.maxNotional, 2)}, max leverage ${risk.maxLeverage}x, symbols ${symbolText}`;
+    return;
+  }
+  ui.riskBadge.classList.add(session.mode === "testnet" ? "badge-testnet" : "badge-muted");
+  ui.riskBadge.textContent = session.mode === "testnet" ? "TESTNET GUARDS STANDBY" : "DRY RUN";
+  ui.riskBadge.title = "Live risk guardrails apply when live mode is unlocked.";
+}
+
 function renderSession() {
   const session = app.session;
   setModeBadge(session.mode);
+  renderRiskBadge(session);
   const exchange = session.exchanges.find((item) => item.id === session.exchangeId);
   const exchangeLabel = exchange?.label || session.exchangeId;
   ui.connectionLabel.textContent = session.hasApiKey
@@ -440,14 +663,21 @@ async function loadSession() {
 
 async function loadSymbols() {
   const { symbols } = await request("/api/symbols");
-  app.symbols = symbols;
-  const available = new Set(symbols.map((item) => item.symbol));
+  const allowedSymbols = liveAllowedSymbols();
+  const visibleSymbols = allowedSymbols.length
+    ? symbols.filter((item) => allowedSymbols.includes(item.symbol))
+    : symbols;
+  if (allowedSymbols.length && !visibleSymbols.length) {
+    toast("LIVE_ALLOWED_SYMBOLS does not match any exchange symbols", true);
+  }
+  app.symbols = visibleSymbols.length ? visibleSymbols : symbols;
+  const available = new Set(app.symbols.map((item) => item.symbol));
   const typed = (ui.symbolInput.value || app.activeSymbol || "BTCUSDC").trim().toUpperCase();
   const preferred = available.has(typed) ? typed : available.has("BTCUSDC") ? "BTCUSDC" : "BTCUSDT";
-  ui.symbolOptions.innerHTML = symbols
+  ui.symbolOptions.innerHTML = app.symbols
     .map((item) => `<option value="${escapeHtml(item.symbol)}">${escapeHtml(item.baseAsset)}/${escapeHtml(item.quoteAsset)}</option>`)
     .join("");
-  app.activeSymbol = available.has(preferred) ? preferred : symbols[0]?.symbol || "BTCUSDC";
+  app.activeSymbol = available.has(preferred) ? preferred : app.symbols[0]?.symbol || "BTCUSDC";
   ui.symbolInput.value = app.activeSymbol;
   await loadLeverageBracket();
   updateChaseSummary();
@@ -456,9 +686,12 @@ async function loadSymbols() {
 async function loadLeverageBracket() {
   try {
     const payload = await request(`/api/account/leverage-bracket?symbol=${encodeURIComponent(currentSymbol())}`);
-    app.leverageMax = Math.max(1, Number(payload.maxLeverage || 125));
+    const exchangeMax = Math.max(1, Number(payload.maxLeverage || 125));
+    const riskMax = app.session?.mode === "live" ? Number(app.session.liveRisk?.maxLeverage || 0) : 0;
+    app.leverageMax = riskMax > 0 ? Math.min(exchangeMax, riskMax) : exchangeMax;
   } catch {
-    app.leverageMax = 125;
+    const riskMax = app.session?.mode === "live" ? Number(app.session.liveRisk?.maxLeverage || 0) : 0;
+    app.leverageMax = riskMax > 0 ? Math.min(125, riskMax) : 125;
   }
   ui.leverageInput.max = String(app.leverageMax);
   if (Number(ui.leverageInput.value) > app.leverageMax) {
@@ -802,41 +1035,176 @@ function jobPurposeLabel(purpose) {
   return "";
 }
 
+function normalizedJobStatus(job) {
+  return String(job?.status || "unknown").toLowerCase();
+}
+
+function jobStatusClass(job) {
+  const status = normalizedJobStatus(job);
+  if (status === "running" || status === "stopping") return "job-active";
+  if (status === "error" || status === "rejected" || status === "expired") return "job-error-state";
+  if (status === "filled" || status === "done") return "job-done";
+  if (TERMINAL_JOB_STATUSES.has(status)) return "job-terminal";
+  return "";
+}
+
+function statusPillClass(job) {
+  const status = normalizedJobStatus(job);
+  if (status === "running" || status === "stopping") return "status-active";
+  if (status === "error" || status === "rejected" || status === "expired") return "status-error";
+  if (status === "filled" || status === "done") return "status-done";
+  if (TERMINAL_JOB_STATUSES.has(status)) return "status-terminal";
+  return "status-muted";
+}
+
+function jobTitle(job) {
+  return [
+    jobPurposeLabel(job.purpose),
+    job.symbol,
+    job.action || job.side,
+    job.positionSide,
+    "LIMIT",
+    job.timeInForce
+  ].filter(Boolean).join(" ");
+}
+
+function jobTargetText(job) {
+  const pending = job.pendingPrice ? formatPrice(job.pendingPrice) : "";
+  const last = job.lastPrice ? formatPrice(job.lastPrice) : "";
+  if (pending && pending !== "-") {
+    return last && pending !== last ? `${pending} pending` : pending;
+  }
+  return last || "-";
+}
+
+function jobReplacementText(job) {
+  const count = Number(job.replaceCount || 0);
+  const max = Number(job.maxReplaces || 0);
+  return max > 0 ? `${count}/${max}` : `${count}`;
+}
+
+function jobRetryText(job) {
+  const current = Number(job.retryCount || 0);
+  const total = Number(job.totalRetries || 0);
+  return `${current}/${total}`;
+}
+
+function jobSortRank(job) {
+  const status = normalizedJobStatus(job);
+  if (status === "running") return 0;
+  if (status === "stopping") return 1;
+  if (status === "error" || status === "rejected" || status === "expired") return 2;
+  if (status === "filled" || status === "done") return 3;
+  if (TERMINAL_JOB_STATUSES.has(status)) return 4;
+  return 5;
+}
+
+function jobSortTime(job) {
+  const time = Date.parse(job?.updatedAt || job?.createdAt || "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+function shortTime(value) {
+  if (!value) return "";
+  const time = new Date(value);
+  if (Number.isNaN(time.getTime())) return "";
+  return time.toLocaleTimeString("ko-KR", { hour12: false });
+}
+
+function jobTerminalText(job) {
+  const status = normalizedJobStatus(job);
+  if (!TERMINAL_JOB_STATUSES.has(status)) return "";
+  const time = shortTime(job.filledAt || job.updatedAt);
+  const reason = compactText(job.terminalReason || job.error || "", 120);
+  return [
+    `terminal ${status.toUpperCase()}`,
+    time ? `@ ${time}` : "",
+    reason && reason.toLowerCase() !== status ? reason : ""
+  ].filter(Boolean).join(" · ");
+}
+
+function jobLastErrorText(job) {
+  return compactText(job.lastError || job.error || "", 140);
+}
+
+function renderJobField(label, value, extraClass = "") {
+  return `
+    <div class="job-field ${extraClass}">
+      <span class="job-field-label">${escapeHtml(label)}</span>
+      <span>${escapeHtml(value || "-")}</span>
+    </div>
+  `;
+}
+
 function compactJobTelemetry(job) {
   const parts = [];
   if (job.marketSource) parts.push(job.marketSource);
   if (job.lastWakeSource && job.lastWakeSource !== job.marketSource) parts.push(`wake ${job.lastWakeSource}`);
   if (job.replaceStrategy) parts.push(job.replaceStrategy);
+  if (job.fillStatus && job.fillStatus !== "none") parts.push(`fill-state ${job.fillStatus}`);
   if (job.lastReplaceLatencyMs) parts.push(`ack ${job.lastReplaceLatencyMs}ms`);
   if (job.lastReplaceTotalMs && job.lastReplaceTotalMs !== job.lastReplaceLatencyMs) {
     parts.push(`total ${job.lastReplaceTotalMs}ms`);
   }
-  if (job.rateGateWaitMs) parts.push(`gate ${job.rateGateWaitMs}ms`);
+  if (job.rateGateWaitMs || job.lastRateGateWaitMs) parts.push(`gate ${job.rateGateWaitMs || job.lastRateGateWaitMs}ms`);
   if (job.statusSource) parts.push(`status ${job.statusSource}`);
   if (job.fillSource) parts.push(`fill ${job.fillSource}`);
   return parts.join(" · ");
 }
 
+function jobStateLabel(job) {
+  const state = job.state || job.status || "";
+  return job.terminalReason ? `${state} (${job.terminalReason})` : state;
+}
+
+function jobQuantityLabel(job) {
+  const remaining = job.remainingQuantity || job.quantity;
+  const original = job.originalQuantity || job.quantity;
+  if (remaining !== original) {
+    return `${formatNumber(remaining, 6)} / ${formatNumber(original, 6)}`;
+  }
+  return formatNumber(job.quantity, 6);
+}
+
 function renderJobs(jobs) {
-  const activeJobs = jobs.slice(0, 8);
-  app.chaseJobId = activeJobs.find((job) => job.status === "running")?.id || app.chaseJobId;
+  const sortedJobs = jobs.slice().sort((a, b) => (
+    jobSortRank(a) - jobSortRank(b) ||
+    jobSortTime(b) - jobSortTime(a)
+  ));
+  const activeJobs = sortedJobs.slice(0, 8);
+  const runningJob = sortedJobs.find((job) => normalizedJobStatus(job) === "running");
+  app.hasRunningChaseJob = Boolean(runningJob);
+  app.chaseJobId = runningJob?.id || "";
+  updateActionControls();
   if (!activeJobs.length) {
     ui.jobsList.innerHTML = `<div class="job-item"><span class="job-meta">추격 지정가 작업 없음</span></div>`;
     return;
   }
-  ui.jobsList.innerHTML = activeJobs.map((job) => `
-    <div class="job-item">
+  ui.jobsList.innerHTML = activeJobs.map((job) => {
+    const telemetry = compactJobTelemetry(job);
+    const terminalText = jobTerminalText(job);
+    const lastError = jobLastErrorText(job);
+    return `
+    <div class="job-item ${jobStatusClass(job)}">
       <div class="job-main">
-        <span>${escapeHtml(jobPurposeLabel(job.purpose) ? `${jobPurposeLabel(job.purpose)} ` : "")}${escapeHtml(job.symbol)} ${escapeHtml(job.action || job.side)} ${escapeHtml(job.positionSide || "")} LIMIT ${escapeHtml(job.timeInForce || "")}</span>
-        <span>${escapeHtml(job.status)}</span>
+        <span class="job-title">${escapeHtml(jobTitle(job))}</span>
+        <span class="status-pill ${statusPillClass(job)}">${escapeHtml(normalizedJobStatus(job).toUpperCase())}</span>
       </div>
-      <div class="job-meta">qty ${formatNumber(job.quantity, 6)} @ ${escapeHtml(job.pegSide || pegSideLabel(job.action || "OPEN", job.positionSide || "LONG"))} ${signedTickOffset(job.tickOffset)}</div>
-      <div class="job-meta">replace #${job.replaceCount || job.iterations} ${job.lastPrice ? `order @ ${formatPrice(job.lastPrice)}` : ""} ${job.effectiveUpdateMs ? `${job.effectiveUpdateMs}ms` : ""}</div>
-      ${compactJobTelemetry(job) ? `<div class="job-meta job-telemetry">${escapeHtml(compactJobTelemetry(job))}</div>` : ""}
-      ${job.backoffMs ? `<div class="job-meta">backoff ${job.backoffMs}ms</div>` : ""}
-      ${job.error ? `<div class="negative">${escapeHtml(job.error)}</div>` : ""}
+      <div class="job-fields">
+        ${renderJobField("qty", formatNumber(job.quantity, 6))}
+        ${renderJobField("target", jobTargetText(job))}
+        ${renderJobField("peg", `${job.pegSide || pegSideLabel(job.action || "OPEN", job.positionSide || "LONG")} ${signedTickOffset(job.tickOffset)}`)}
+        ${renderJobField("replace", jobReplacementText(job))}
+        ${renderJobField("retry", jobRetryText(job), Number(job.retryCount || 0) > 0 ? "job-field-warn" : "")}
+        ${renderJobField("interval", job.effectiveUpdateMs ? `${job.effectiveUpdateMs}ms` : "-")}
+      </div>
+      ${telemetry ? `<div class="job-meta job-telemetry">${escapeHtml(telemetry)}</div>` : ""}
+      ${job.backoffMs ? `<div class="job-meta job-backoff">backoff ${escapeHtml(job.backoffMs)}ms</div>` : ""}
+      ${terminalText ? `<div class="job-meta job-terminal-text">${escapeHtml(terminalText)}</div>` : ""}
+      ${lastError ? `<div class="job-last-error">last error: ${escapeHtml(lastError)}</div>` : ""}
     </div>
-  `).join("");
+  `;
+  }).join("");
 }
 
 async function loadLogs() {
@@ -910,15 +1278,18 @@ async function placeMarketOrder() {
 }
 
 async function submitLimitOrder() {
-  if (ui.fastModeInput.checked) {
-    await placeMarketOrder();
-    return;
-  }
-  if (ui.autoChaseInput.checked) {
-    await startChase();
-    return;
-  }
-  await placeLimitOrder();
+  const actionKey = currentSubmitActionKey();
+  await runTradeAction(actionKey, async () => {
+    if (ui.fastModeInput.checked) {
+      await placeMarketOrder();
+      return;
+    }
+    if (ui.autoChaseInput.checked) {
+      await startChase();
+      return;
+    }
+    await placeLimitOrder();
+  });
 }
 
 async function startChase() {
@@ -926,6 +1297,8 @@ async function startChase() {
     ...orderBody()
   });
   app.chaseJobId = job.id;
+  app.hasRunningChaseJob = normalizedJobStatus(job) === "running";
+  updateActionControls();
   toast("추격 지정가 시작");
   await refreshAll();
 }
@@ -937,49 +1310,69 @@ async function reversePosition() {
   const ok = window.confirm(`${currentSymbol()} ${from} 포지션을 현재 수량 기준으로 ${route} 정리 후 ${to} OPEN 합니다.`);
   if (!ok) return;
 
-  const result = await post("/api/trade/reverse", {
-    ...orderBody(),
-    action: "CLOSE",
-    positionSide: from
+  await runTradeAction("reverse", async () => {
+    const result = await post("/api/trade/reverse", {
+      ...orderBody(),
+      action: "CLOSE",
+      positionSide: from,
+      confirm: "REVERSE_POSITION"
+    });
+    if (result.id) {
+      app.chaseJobId = result.id;
+      app.hasRunningChaseJob = normalizedJobStatus(result) === "running";
+      updateActionControls();
+    }
+    toast(`${ui.fastModeInput.checked ? "FAST " : ""}리버스 시작 ${from} -> ${to}`);
+    await refreshAll();
   });
-  if (result.id) app.chaseJobId = result.id;
-  toast(`${ui.fastModeInput.checked ? "FAST " : ""}리버스 시작 ${from} -> ${to}`);
-  await refreshAll();
 }
 
 async function stopChase() {
-  if (!app.chaseJobId) {
-    toast("중지할 추격 지정가 작업이 없습니다", true);
+  if (!app.chaseJobId || !app.hasRunningChaseJob) {
+    const message = "CHASE STOP failed: 중지할 추격 지정가 작업이 없습니다";
+    setOperationStatus(message, "negative");
+    toast(message, true);
     return;
   }
-  await post("/api/trade/chase/stop", {
-    jobId: app.chaseJobId,
-    cancelOrder: true
+  await runTradeAction("chaseStop", async () => {
+    await post("/api/trade/chase/stop", {
+      jobId: app.chaseJobId,
+      cancelOrder: true,
+      confirm: "STOP_CHASE"
+    });
+    app.hasRunningChaseJob = false;
+    app.chaseJobId = "";
+    updateActionControls();
+    toast("추격 주문 중지");
+    await refreshAll();
   });
-  toast("추격 주문 중지");
-  await refreshAll();
 }
 
 async function cancelAllOrders() {
   const symbol = currentSymbol();
   const ok = window.confirm(`${symbol} 오픈 오더를 모두 취소할까요?`);
   if (!ok) return;
-  await post("/api/trade/cancel-all", { symbol });
-  toast("오픈 오더 취소 완료");
-  await refreshAll();
+  await runTradeAction("cancel", async () => {
+    await post("/api/trade/cancel-all", { symbol, confirm: "CANCEL_ALL" });
+    toast("오픈 오더 취소 완료");
+    await refreshAll();
+  });
+
 }
 
 async function emergencyClose() {
   const target = ui.closeAllInput.checked ? "전체 심볼" : currentSymbol();
   const typed = window.prompt(`${target} 포지션 정리 확인: CLOSE_NOW 입력`);
   if (typed !== "CLOSE_NOW") return;
-  await post("/api/trade/emergency-close", {
-    symbol: currentSymbol(),
-    all: ui.closeAllInput.checked,
-    confirm: "CLOSE_NOW"
+  await runTradeAction("emergency", async () => {
+    await post("/api/trade/emergency-close", {
+      symbol: currentSymbol(),
+      all: ui.closeAllInput.checked,
+      confirm: "CLOSE_NOW"
+    });
+    toast("긴급 정리 요청 완료");
+    await refreshAll();
   });
-  toast("긴급 정리 요청 완료");
-  await refreshAll();
 }
 
 function setAction(action) {
@@ -1074,11 +1467,11 @@ function bindEvents() {
   ui.intervalSelect.addEventListener("change", loadMarket);
   ui.positionsRefresh.addEventListener("click", loadAccount);
   ui.ordersRefresh.addEventListener("click", loadAccount);
-  ui.limitOrderButton.addEventListener("click", () => submitLimitOrder().catch((error) => toast(error.message, true)));
-  ui.reverseButton?.addEventListener("click", () => reversePosition().catch((error) => toast(error.message, true)));
-  ui.stopChaseButton.addEventListener("click", () => stopChase().catch((error) => toast(error.message, true)));
-  ui.cancelAllButton.addEventListener("click", () => cancelAllOrders().catch((error) => toast(error.message, true)));
-  ui.emergencyButton.addEventListener("click", () => emergencyClose().catch((error) => toast(error.message, true)));
+  ui.limitOrderButton.addEventListener("click", submitLimitOrder);
+  ui.reverseButton?.addEventListener("click", reversePosition);
+  ui.stopChaseButton.addEventListener("click", stopChase);
+  ui.cancelAllButton.addEventListener("click", cancelAllOrders);
+  ui.emergencyButton.addEventListener("click", emergencyClose);
   ui.openAction.addEventListener("click", () => setAction("OPEN"));
   ui.closeAction.addEventListener("click", () => setAction("CLOSE"));
   ui.longIntent.addEventListener("click", () => setIntent("LONG"));

@@ -48,6 +48,8 @@ button {
   padding: 0 18px;
   cursor: pointer;
   font-weight: 700;
+  line-height: 1.2;
+  white-space: normal;
 }
 
 button:hover {
@@ -59,6 +61,34 @@ button:disabled {
   color: #66716d;
   cursor: not-allowed;
   opacity: 0.65;
+}
+
+button.pending {
+  border-color: rgba(90, 167, 255, 0.5);
+  color: #cfe5ff;
+}
+
+button.pending::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 8px;
+  border-radius: 50%;
+  background: var(--blue);
+  animation: pendingPulse 900ms ease-in-out infinite;
+  vertical-align: middle;
+}
+
+@keyframes pendingPulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 input,
@@ -281,6 +311,15 @@ h2 {
   font-size: 12px;
 }
 
+.control-section label > span:not(.switch-row) {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .control-section > button {
   min-height: 56px;
 }
@@ -296,10 +335,12 @@ h2 {
 }
 
 .field-meta {
-  float: right;
+  margin-left: auto;
   color: #c6d5cf;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .leverage-control {
@@ -383,6 +424,39 @@ input[type="range"] {
   font-size: 12px;
   line-height: 1.35;
   word-break: break-word;
+}
+
+.operation-status {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0f1412;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.operation-status.pending {
+  color: #cfe5ff;
+  border-color: rgba(90, 167, 255, 0.42);
+  background: rgba(90, 167, 255, 0.1);
+}
+
+.operation-status.positive {
+  color: #baf4d8;
+  border-color: rgba(32, 191, 116, 0.45);
+  background: rgba(32, 191, 116, 0.1);
+}
+
+.operation-status.negative {
+  color: #ffd2d2;
+  border-color: rgba(255, 92, 92, 0.45);
+  background: rgba(255, 92, 92, 0.1);
 }
 
 .segmented {
@@ -518,19 +592,111 @@ th {
 
 .job-item {
   display: grid;
-  gap: 4px;
+  min-width: 0;
+  gap: 6px;
   border: 1px solid var(--line);
   border-radius: 6px;
   padding: 8px;
   background: #101513;
   font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.job-active {
+  border-color: rgba(90, 167, 255, 0.45);
+  box-shadow: inset 3px 0 0 var(--blue);
+}
+
+.job-error-state {
+  border-color: rgba(255, 92, 92, 0.45);
+  box-shadow: inset 3px 0 0 var(--red);
+}
+
+.job-done {
+  border-color: rgba(32, 191, 116, 0.35);
+  box-shadow: inset 3px 0 0 var(--green);
+}
+
+.job-terminal {
+  border-color: rgba(232, 184, 74, 0.35);
+  box-shadow: inset 3px 0 0 var(--amber);
 }
 
 .job-main {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
   gap: 8px;
   font-weight: 700;
+}
+
+.job-title {
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.status-active {
+  color: #cfe5ff;
+  border-color: rgba(90, 167, 255, 0.5);
+  background: rgba(90, 167, 255, 0.12);
+}
+
+.status-error {
+  color: #ffd2d2;
+  border-color: rgba(255, 92, 92, 0.5);
+  background: rgba(255, 92, 92, 0.12);
+}
+
+.status-done {
+  color: #baf4d8;
+  border-color: rgba(32, 191, 116, 0.5);
+  background: rgba(32, 191, 116, 0.12);
+}
+
+.status-terminal {
+  color: #ffe1a1;
+  border-color: rgba(232, 184, 74, 0.5);
+  background: rgba(232, 184, 74, 0.12);
+}
+
+.status-muted {
+  color: var(--muted);
+  background: #171d1a;
+}
+
+.job-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px 8px;
+}
+
+.job-field {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  color: #dbe5e1;
+}
+
+.job-field-label {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.job-field-warn {
+  color: var(--amber);
 }
 
 .job-meta {
@@ -539,6 +705,16 @@ th {
 
 .job-telemetry {
   color: var(--text);
+}
+
+.job-backoff,
+.job-terminal-text {
+  color: var(--amber);
+}
+
+.job-last-error {
+  color: var(--red);
+  line-height: 1.3;
 }
 
 .log-panel {
@@ -651,5 +827,9 @@ th {
   .jobs-list {
     border-left: 0;
     border-top: 1px solid var(--line);
+  }
+
+  .job-fields {
+    grid-template-columns: 1fr;
   }
 }

@@ -75,5 +75,7 @@ Set-Content -LiteralPath (Join-Path $PackageDir "README.txt") -Value $readme -En
 
 Compress-Archive -LiteralPath $PackageDir -DestinationPath $ZipPath -Force
 
+& (Join-Path $Root "check-retail-package.ps1") -PackagePath $PackageDir -ZipPath $ZipPath
+
 Write-Host "Built retail package: $PackageDir"
 Write-Host "Built retail zip: $ZipPath"
