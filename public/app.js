@@ -1140,7 +1140,7 @@ function renderPositions(positions) {
 
 function renderOrders(orders) {
   if (!orders.length) {
-    ui.ordersBody.innerHTML = emptyRow(7, "오픈 오더 없음");
+    ui.ordersBody.innerHTML = emptyRow(8, "오픈 오더 없음");
     return;
   }
   ui.ordersBody.innerHTML = orders.map((order) => `
@@ -1152,6 +1152,16 @@ function renderOrders(orders) {
       <td>${formatNumber(order.origQty, 6)}</td>
       <td>${formatPrice(order.price)}</td>
       <td>${escapeHtml(order.status)}</td>
+      <td>
+        <button
+          class="order-cancel-button"
+          type="button"
+          data-order-id="${escapeHtml(order.orderId)}"
+          data-symbol="${escapeHtml(order.symbol)}"
+          title="오더 닫기"
+          aria-label="${escapeHtml(`${order.symbol} ${order.orderId} 오더 닫기`)}"
+        >닫기</button>
+      </td>
     </tr>
   `).join("");
 }
@@ -1487,6 +1497,19 @@ async function cancelAllOrders() {
 
 }
 
+async function cancelOpenOrder(orderId, symbol) {
+  if (!orderId || !symbol || hasPendingAction()) return;
+  await runTradeAction("cancel", async () => {
+    await post("/api/trade/cancel-order", {
+      symbol,
+      orderId,
+      confirm: "CANCEL_ORDER"
+    });
+    toast(`${symbol} 오더 닫기 완료`);
+    await refreshAll();
+  });
+}
+
 async function emergencyClose() {
   const target = ui.closeAllInput.checked ? "전체 심볼" : currentSymbol();
   const typed = window.prompt(`${target} 포지션 정리 확인: CLOSE_NOW 입력`);
@@ -1597,6 +1620,11 @@ function bindEvents() {
   });
   ui.positionsRefresh.addEventListener("click", loadAccount);
   ui.ordersRefresh.addEventListener("click", loadAccount);
+  ui.ordersBody.addEventListener("click", (event) => {
+    const button = event.target.closest?.(".order-cancel-button");
+    if (!button) return;
+    cancelOpenOrder(button.dataset.orderId, button.dataset.symbol).catch((error) => toast(error.message, true));
+  });
   ui.limitOrderButton.addEventListener("click", submitLimitOrder);
   ui.reverseButton?.addEventListener("click", reversePosition);
   ui.stopChaseButton.addEventListener("click", stopChase);

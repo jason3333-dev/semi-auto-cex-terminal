@@ -115,6 +115,7 @@ function loadTerminalApp() {
       beginAction,
       createRequestError,
       renderJobs,
+      renderOrders,
       runTradeAction,
       serverFailureMessage,
       updateActionControls
@@ -286,6 +287,28 @@ test("stop chase control tracks visible running jobs", () => {
   assert.equal(app.hasRunningChaseJob, false);
   assert.equal(app.chaseJobId, "");
   assert.equal(ui.stopChaseButton.disabled, true);
+});
+
+test("open orders render per-row close controls", () => {
+  const { renderOrders, ui } = loadTerminalApp();
+
+  renderOrders([
+    {
+      symbol: "BTCUSDC",
+      orderId: "1001",
+      action: "OPEN",
+      positionSide: "LONG",
+      type: "LIMIT",
+      timeInForce: "GTX",
+      origQty: "0.001",
+      price: "80000",
+      status: "NEW"
+    }
+  ]);
+
+  assert.match(ui.ordersBody.innerHTML, /class="order-cancel-button"/);
+  assert.match(ui.ordersBody.innerHTML, /data-order-id="1001"/);
+  assert.match(ui.ordersBody.innerHTML, /닫기/);
 });
 
 test("running chase jobs stay visible ahead of terminal history", () => {

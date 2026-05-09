@@ -524,6 +524,14 @@ input[type="range"] {
   font-size: 12px;
 }
 
+.order-cancel-button {
+  min-height: 30px;
+  padding: 0 10px;
+  border-color: rgba(255, 92, 92, 0.42);
+  color: #ffd2d2;
+  font-size: 12px;
+}
+
 .positions-panel {
   grid-column: 1;
   grid-row: 2;
@@ -560,6 +568,12 @@ td:first-child,
 th:nth-child(2),
 td:nth-child(2) {
   text-align: left;
+}
+
+.orders-panel th:last-child,
+.orders-panel td:last-child {
+  width: 64px;
+  text-align: center;
 }
 
 th {

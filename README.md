@@ -13,7 +13,7 @@ MemeMax Orderly perps를 기준으로 만든 로컬 반자동 트레이딩 터�
 - Reverse: 현재 포지션 chase 정리 후 반대 포지션 OPEN
 - Stop loss / take profit 금액 또는 `%` 비율 입력
 - 포지션, 오픈 오더, chase job, 잔액, 세션 PnL 표시
-- 긴급 정리: 오픈 오더 취소, 포지션 정리
+- 긴급 정리: 오픈 오더 개별/전체 취소, 포지션 정리
 - 거래소 어댑터 구조: MemeMax Orderly를 기본으로 두고 필요 시 확장
 
 ## 실행

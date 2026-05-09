@@ -2463,6 +2463,25 @@ async function handleApi(req, res, pathname, searchParams) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/trade/cancel-order") {
+    requireLiveGuard("Cancel order");
+    const body = await readBody(req);
+    requireLiveConfirm(body, "CANCEL_ORDER", "Cancel order");
+    const symbol = requireLiveRiskSymbol("Cancel order", body.symbol);
+    const orderId = String(body.orderId || "").trim();
+    if (!orderId) throw new ExchangeError("Cancel order requires orderId");
+    const result = await adapter.cancelOrder(context(), { symbol, orderId });
+    auditOrderEvent("order.cancel", {
+      symbol,
+      orderId,
+      reason: "single-order",
+      response: result
+    }, { severity: "warn" });
+    log("warn", "Open order canceled", { symbol, orderId, mode: state.mode });
+    json(res, 200, result);
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/trade/cancel-all") {
     requireLiveGuard("Cancel all orders");
     const body = await readBody(req);

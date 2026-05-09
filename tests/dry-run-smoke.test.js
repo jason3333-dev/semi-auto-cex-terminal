@@ -185,6 +185,28 @@ test("dry-run HTTP smoke covers core validation flows without credentials", asyn
   let snapshot = await requestJson(baseUrl, "/api/account/snapshot?symbol=BTCUSDC");
   assert.ok(snapshot.orders.some((order) => String(order.orderId) === String(limitOrder.orderId)));
 
+  const singleCancel = await requestJson(baseUrl, "/api/trade/cancel-order", {
+    method: "POST",
+    body: { symbol: "BTCUSDC", orderId: limitOrder.orderId }
+  });
+  assert.equal(singleCancel.canceled, true);
+
+  snapshot = await requestJson(baseUrl, "/api/account/snapshot?symbol=BTCUSDC");
+  assert.equal(snapshot.orders.length, 0);
+
+  const secondLimitOrder = await requestJson(baseUrl, "/api/trade/limit-order", {
+    method: "POST",
+    body: {
+      symbol: "BTCUSDC",
+      action: "OPEN",
+      positionSide: "LONG",
+      quantity: "0.001",
+      price: "64000",
+      leverage: 7
+    }
+  });
+  assert.equal(secondLimitOrder.status, "NEW");
+
   const cancelResult = await requestJson(baseUrl, "/api/trade/cancel-all", {
     method: "POST",
     body: { symbol: "BTCUSDC" }
