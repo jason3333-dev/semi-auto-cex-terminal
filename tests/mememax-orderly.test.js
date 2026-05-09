@@ -114,7 +114,7 @@ test("MemeMax signed requests derive Orderly key when it is omitted", async () =
 test("MemeMax positional bracket packs SL and TP in one adapter call", async () => {
   const adapter = new MememaxOrderlyAdapter();
   const result = await adapter.placePositionBracketOrder(
-    { mode: "dry-run", credentials: {} },
+    { mode: "dry-run", marketDataMode: "mock", credentials: {} },
     {
       symbol: "BTCUSDC",
       side: "SELL",
@@ -132,7 +132,7 @@ test("MemeMax positional bracket packs SL and TP in one adapter call", async () 
 
 test("MemeMax dry-run market data stays internally coherent", async () => {
   const adapter = new MememaxOrderlyAdapter();
-  const context = { mode: "dry-run", credentials: {} };
+  const context = { mode: "dry-run", marketDataMode: "mock", credentials: {} };
 
   const symbols = await adapter.getSymbols(context);
   const ticker = await adapter.getTicker(context, "BTCUSDC");
@@ -141,11 +141,107 @@ test("MemeMax dry-run market data stays internally coherent", async () => {
 
   assert.equal(symbols[0].symbol, "BTCUSDC");
   assert.equal(ticker.price, "65000.0");
-  assert.equal(book.source, "dry-run");
+  assert.equal(book.source, "mock");
   assert.equal(book.bids[0][0], "64999");
   assert.equal(book.asks[0][0], "65001");
   assert.equal(klines.length, 4);
   assert.ok(klines.every((row) => Number(row.close) > 64000 && Number(row.close) < 66000));
+});
+
+test("MemeMax dry-run uses live public market data when enabled", async () => {
+  const adapter = new MememaxOrderlyAdapter();
+  const originalFetch = global.fetch;
+  const requested = [];
+
+  adapter.baseUrl = () => "https://api.example.orderly";
+  global.fetch = async (url, options) => {
+    requested.push({ url: String(url), headers: options.headers });
+    return new Response('{"success":true,"data":{"symbol":"PERP_BTC_USDC","last_price":"70123.4"}}', {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    const ticker = await adapter.getTicker(
+      { mode: "dry-run", marketDataMode: "live", credentials: {} },
+      "BTCUSDC"
+    );
+    assert.equal(ticker.price, "70123.4");
+    assert.equal(ticker.source, "rest");
+    assert.ok(requested[0].url.includes("/v1/public/futures/PERP_BTC_USDC"));
+    assert.equal(requested[0].headers["orderly-signature"], undefined);
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("MemeMax live market data mode does not fall back to mock prices", async () => {
+  const adapter = new MememaxOrderlyAdapter();
+  const originalFetch = global.fetch;
+
+  adapter.baseUrl = () => "https://api.example.orderly";
+  global.fetch = async () => new Response('{"success":false,"message":"public market unavailable"}', {
+    status: 503,
+    headers: { "content-type": "application/json" }
+  });
+
+  try {
+    await assert.rejects(
+      adapter.getTicker(
+        { mode: "dry-run", marketDataMode: "live", credentials: {} },
+        "BTCUSDC"
+      ),
+      /public market unavailable/
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("MemeMax dry-run signs read-only market data endpoints when credentials are configured", async () => {
+  const adapter = new MememaxOrderlyAdapter();
+  const originalFetch = global.fetch;
+  const capturedHeaders = {};
+
+  adapter.baseUrl = () => "https://api.example.orderly";
+  adapter.ensureMarketDataStream = () => false;
+  global.fetch = async (url, options) => {
+    Object.assign(capturedHeaders, options.headers);
+    assert.ok(String(url).includes("/v1/orderbook/PERP_BTC_USDC"));
+    return new Response(JSON.stringify({
+      success: true,
+      data: {
+        timestamp: 1778364700000,
+        bids: [{ price: 80700, quantity: 0.1 }],
+        asks: [{ price: 80701, quantity: 0.2 }]
+      }
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+
+  try {
+    const orderBook = await adapter.getOrderBook(
+      {
+        mode: "dry-run",
+        marketDataMode: "live",
+        credentials: {
+          accountId: "0x0000000000000000000000000000000000000000000000000000000000000002",
+          orderlySecret: "1111111111111111111111111111111"
+        }
+      },
+      { symbol: "BTCUSDC", limit: 1 }
+    );
+    assert.equal(capturedHeaders["orderly-account-id"], "0x0000000000000000000000000000000000000000000000000000000000000002");
+    assert.ok(capturedHeaders["orderly-key"]);
+    assert.ok(capturedHeaders["orderly-signature"]);
+    assert.deepEqual(orderBook.bids[0], ["80700", "0.1"]);
+    assert.deepEqual(orderBook.asks[0], ["80701", "0.2"]);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("MemeMax subscribes to Orderly trade and kline websocket topics", () => {

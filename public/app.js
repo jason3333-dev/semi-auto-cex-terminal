@@ -92,7 +92,8 @@ const app = {
   marketRequestSeq: 0,
   hasRunningChaseJob: false,
   pendingActions: new Set(),
-  operationStatusTimer: null
+  operationStatusTimer: null,
+  priceSource: ""
 };
 
 const ACTION_COPY = {
@@ -317,6 +318,22 @@ function updatePositionSize() {
   const quote = currentSymbol().endsWith("USDC") ? "USDC" : "USDT";
   const notional = qty * price;
   ui.positionSizeLabel.textContent = `Size ${formatNumber(notional, 2)} ${quote} · Liq ${liquidationText}`;
+}
+
+function liveSourceLabel(source) {
+  const normalized = String(source || "").toUpperCase();
+  if (!normalized) return "LIVE";
+  if (normalized.includes("MOCK")) return "MOCK";
+  if (normalized.startsWith("WS")) return `LIVE ${normalized}`;
+  if (normalized === "REST") return "LIVE REST";
+  return `LIVE ${normalized}`;
+}
+
+function applyLivePrice(price) {
+  app.lastPriceValue = Number(price.price);
+  app.priceSource = price.source || "";
+  ui.lastPrice.textContent = formatPrice(price.price);
+  ui.limitMetaLabel.textContent = `Last ${formatPrice(price.price)} · ${liveSourceLabel(price.source)}`;
 }
 
 function updateLiveFifteenSecondCandle(price) {
@@ -665,9 +682,10 @@ function renderSession() {
   renderRiskBadge(session);
   const exchange = session.exchanges.find((item) => item.id === session.exchangeId);
   const exchangeLabel = exchange?.label || session.exchangeId;
+  const marketDataMode = session.marketData?.mode === "mock" ? "MD MOCK" : "MD LIVE";
   ui.connectionLabel.textContent = session.hasApiKey
-    ? `${exchangeLabel} · API ${session.apiKeyPreview}`
-    : `${exchangeLabel} · API 키 없음`;
+    ? `${exchangeLabel} · ${marketDataMode} · API ${session.apiKeyPreview}`
+    : `${exchangeLabel} · ${marketDataMode} · API 키 없음`;
 }
 
 async function loadSession() {
@@ -728,9 +746,7 @@ async function loadMarket() {
   if (requestSeq !== app.marketRequestSeq || symbol !== currentSymbol()) return;
   app.klines = klinesPayload.klines;
   app.orderBook = bookPayload.orderBook;
-  app.lastPriceValue = Number(price.price);
-  ui.lastPrice.textContent = formatPrice(price.price);
-  ui.limitMetaLabel.textContent = `Last ${formatPrice(price.price)}`;
+  applyLivePrice(price);
   ui.bestBid.textContent = formatPrice(app.orderBook.bids?.[0]?.[0]);
   ui.bestAsk.textContent = formatPrice(app.orderBook.asks?.[0]?.[0]);
   if (!ui.limitPriceInput.value) {
@@ -745,9 +761,7 @@ async function loadPriceTick() {
   try {
     const price = await request(`/api/market/price?symbol=${encodeURIComponent(symbol)}`);
     if (symbol !== currentSymbol()) return;
-    app.lastPriceValue = Number(price.price);
-    ui.lastPrice.textContent = formatPrice(price.price);
-    ui.limitMetaLabel.textContent = `Last ${formatPrice(price.price)}`;
+    applyLivePrice(price);
     if (updateLiveFifteenSecondCandle(price.price)) drawChart();
     updatePositionSize();
   } catch {

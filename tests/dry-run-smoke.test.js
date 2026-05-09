@@ -91,6 +91,7 @@ test("dry-run HTTP smoke covers core validation flows without credentials", asyn
     "ORDERLY_KEY=",
     "ORDERLY_SECRET=",
     "ACCOUNT_STREAM_ENABLED=false",
+    "MEMEMAX_MARKET_DATA_MODE=mock",
     "MEMEMAX_CHASE_MIN_UPDATE_MS=50",
     "MEMEMAX_CHASE_UPDATE_MS=50",
     "MEMEMAX_CHASE_REST_FALLBACK_UPDATE_MS=50",
@@ -157,7 +158,7 @@ test("dry-run HTTP smoke covers core validation flows without credentials", asyn
   assert.ok(klines.klines.every((row) => Number(row.close) > 0));
 
   const book = await requestJson(baseUrl, "/api/market/orderbook?symbol=BTCUSDC&limit=2");
-  assert.equal(book.orderBook.source, "dry-run");
+  assert.equal(book.orderBook.source, "mock");
   assert.equal(book.orderBook.bids.length, 2);
   assert.equal(book.orderBook.asks.length, 2);
 

@@ -136,6 +136,11 @@ const ACCOUNT_STREAM_KEEPALIVE_MS = Math.max(60_000, envNumber("ACCOUNT_STREAM_K
 const ACCOUNT_STREAM_RECONNECT_MS = Math.max(1000, envNumber("ACCOUNT_STREAM_RECONNECT_MS", 5000));
 const CHART_VWAP_ENABLED = envBoolean("CHART_VWAP_ENABLED", true);
 const CHART_VWAP_PERIOD = Math.max(1, Math.min(500, envNumber("CHART_VWAP_PERIOD", 80)));
+const MARKET_DATA_MODE = ["live", "mock"].includes(
+  String(process.env.MEMEMAX_MARKET_DATA_MODE || process.env.MARKET_DATA_MODE || "live").toLowerCase()
+)
+  ? String(process.env.MEMEMAX_MARKET_DATA_MODE || process.env.MARKET_DATA_MODE || "live").toLowerCase()
+  : "live";
 const CHASE_JOB_STATES = Object.freeze({
   RUNNING: "running",
   STOPPING: "stopping",
@@ -408,7 +413,8 @@ function context() {
     positionMode: activePositionMode(),
     credentials: activeCredentials(),
     liveUnlocked: state.liveUnlocked,
-    liveRisk: activeLiveRiskConfig()
+    liveRisk: activeLiveRiskConfig(),
+    marketDataMode: MARKET_DATA_MODE
   };
 }
 
@@ -446,6 +452,9 @@ function publicSession() {
       reconnectMs: ACCOUNT_STREAM_RECONNECT_MS
     },
     marketStream: adapter.marketDataStreamStatus?.() || null,
+    marketData: {
+      mode: MARKET_DATA_MODE
+    },
     chartConfig: {
       vwapEnabled: CHART_VWAP_ENABLED,
       vwapPeriod: CHART_VWAP_PERIOD

@@ -138,11 +138,13 @@ ACCOUNT_STREAM_ENABLED=true
 ACCOUNT_STREAM_KEEPALIVE_MS=3000000
 ACCOUNT_STREAM_RECONNECT_MS=5000
 
+MEMEMAX_MARKET_DATA_MODE=live
+
 CHART_VWAP_ENABLED=true
 CHART_VWAP_PERIOD=80
 ```
 
-`MEMEMAX_ORDERLY_KEY`는 secret에서 유도할 수 있는 경우 생략할 수 있습니다. `live`를 영구 설정하려면 `LIVE_UNLOCK_PHRASE=I_ACCEPT_LIVE_RISK`가 필요합니다.
+`MEMEMAX_ORDERLY_KEY`는 secret에서 유도할 수 있는 경우 생략할 수 있습니다. `TRADING_MODE=dry-run`이어도 `MEMEMAX_MARKET_DATA_MODE=live`가 기본이라 차트, last, 호가는 Orderly public live market data만 사용합니다. live public 요청이 실패하면 mock 가격으로 조용히 대체하지 않고 오류를 표시합니다. 오프라인 데모나 테스트만 `MEMEMAX_MARKET_DATA_MODE=mock`으로 바꿉니다. `live`를 영구 설정하려면 `LIVE_UNLOCK_PHRASE=I_ACCEPT_LIVE_RISK`가 필요합니다.
 
 ## MemeMax Orderly 기준
 

@@ -449,6 +449,61 @@ function hasSignCredentials(context) {
   return Boolean(credentials.accountId && credentials.orderlySecret);
 }
 
+function useMockMarketData(context) {
+  return String(context.marketDataMode || "").toLowerCase() === "mock";
+}
+
+function mockMarketInfoRows() {
+  return [
+    {
+      symbol: "PERP_BTC_USDC",
+      quote_tick: 0.1,
+      base_tick: 0.00001,
+      base_min: 0.00001,
+      base_max: 20,
+      min_notional: 1
+    },
+    {
+      symbol: "PERP_ETH_USDC",
+      quote_tick: 0.01,
+      base_tick: 0.0001,
+      base_min: 0.0001,
+      base_max: 1000,
+      min_notional: 1
+    },
+    {
+      symbol: "PERP_DOGE_USDC",
+      quote_tick: 0.00001,
+      base_tick: 1,
+      base_min: 1,
+      base_max: 10000000,
+      min_notional: 1
+    }
+  ];
+}
+
+function mockTicker(uiSymbol) {
+  const price = uiSymbol.startsWith("ETH") ? "3200.0" : uiSymbol.startsWith("DOGE") ? "0.18" : "65000.0";
+  return { symbol: uiSymbol, price, time: now(), fallback: true, source: "mock" };
+}
+
+function mockOrderBook(uiSymbol, limit = 20) {
+  const mid = uiSymbol.startsWith("ETH") ? 3200 : uiSymbol.startsWith("DOGE") ? 0.18 : 65000;
+  const tick = uiSymbol.startsWith("DOGE") ? 0.0001 : uiSymbol.startsWith("ETH") ? 0.1 : 1;
+  return {
+    lastUpdateId: now(),
+    bids: Array.from({ length: limit }, (_, index) => [
+      trimDecimal(mid - tick * (index + 1)),
+      trimDecimal(0.4 + index * 0.11)
+    ]),
+    asks: Array.from({ length: limit }, (_, index) => [
+      trimDecimal(mid + tick * (index + 1)),
+      trimDecimal(0.35 + index * 0.09)
+    ]),
+    source: "mock"
+  };
+}
+
 export class MememaxOrderlyAdapter {
   constructor() {
     this.id = "mememax-orderly";
@@ -641,7 +696,7 @@ export class MememaxOrderlyAdapter {
 
   releaseMarketDataStream(context, symbol, { includeKlines = true } = {}) {
     const credentials = credentialsFromContext(context);
-    if (context.mode === "dry-run" || !credentials.accountId || typeof WebSocket === "undefined") {
+    if (useMockMarketData(context) || !credentials.accountId || typeof WebSocket === "undefined") {
       return false;
     }
     const apiSymbol = toApiSymbol(symbol);
@@ -665,7 +720,7 @@ export class MememaxOrderlyAdapter {
 
   focusMarketDataStream(context, { symbol, interval = "15s", retainSymbols = [] }) {
     const credentials = credentialsFromContext(context);
-    if (context.mode === "dry-run" || !credentials.accountId || typeof WebSocket === "undefined") {
+    if (useMockMarketData(context) || !credentials.accountId || typeof WebSocket === "undefined") {
       return false;
     }
     const apiSymbol = toApiSymbol(symbol);
@@ -720,7 +775,7 @@ export class MememaxOrderlyAdapter {
 
   openMarketDataStream(context) {
     const credentials = credentialsFromContext(context);
-    if (context.mode === "dry-run" || !credentials.accountId || typeof WebSocket === "undefined") {
+    if (useMockMarketData(context) || !credentials.accountId || typeof WebSocket === "undefined") {
       return false;
     }
     const currentState = websocketState(this.marketStream.ws);
@@ -778,7 +833,7 @@ export class MememaxOrderlyAdapter {
 
   ensureMarketDataStream(context, symbol) {
     const credentials = credentialsFromContext(context);
-    if (context.mode === "dry-run" || !credentials.accountId || typeof WebSocket === "undefined") {
+    if (useMockMarketData(context) || !credentials.accountId || typeof WebSocket === "undefined") {
       return false;
     }
     const apiSymbol = toApiSymbol(symbol);
@@ -968,7 +1023,7 @@ export class MememaxOrderlyAdapter {
   }
 
   async request(context, method, path, params = {}, options = {}) {
-    if (context.mode === "dry-run" && options.signed) {
+    if (context.mode === "dry-run" && options.signed && !options.allowDryRunSignedReadOnly) {
       throw new ExchangeError("Signed endpoint is not available in dry-run");
     }
 
@@ -1080,43 +1135,20 @@ export class MememaxOrderlyAdapter {
   }
 
   async getMarketInfo(context) {
-    if (context.mode === "dry-run") {
-      return [
-        {
-          symbol: "PERP_BTC_USDC",
-          quote_tick: 0.1,
-          base_tick: 0.00001,
-          base_min: 0.00001,
-          base_max: 20,
-          min_notional: 1
-        },
-        {
-          symbol: "PERP_ETH_USDC",
-          quote_tick: 0.01,
-          base_tick: 0.0001,
-          base_min: 0.0001,
-          base_max: 1000,
-          min_notional: 1
-        },
-        {
-          symbol: "PERP_DOGE_USDC",
-          quote_tick: 0.00001,
-          base_tick: 1,
-          base_min: 1,
-          base_max: 10000000,
-          min_notional: 1
-        }
-      ];
-    }
+    if (useMockMarketData(context)) return mockMarketInfoRows();
 
-    const cacheKey = context.mode;
+    const cacheKey = `${context.mode}:${context.marketDataMode || "live"}`;
     const cached = this.symbolCache.get(cacheKey);
     if (cached && now() - cached.time < 10 * 60_000) return cached.payload;
 
-    const payload = await this.request(context, "GET", "/v1/public/info");
-    const rows = payload.data?.rows || [];
-    this.symbolCache.set(cacheKey, { time: now(), payload: rows });
-    return rows;
+    try {
+      const payload = await this.request(context, "GET", "/v1/public/info");
+      const rows = payload.data?.rows || [];
+      this.symbolCache.set(cacheKey, { time: now(), payload: rows });
+      return rows;
+    } catch (error) {
+      throw error;
+    }
   }
 
   async getSymbols(context) {
@@ -1151,26 +1183,27 @@ export class MememaxOrderlyAdapter {
 
   async getTicker(context, symbol) {
     const uiSymbol = toUiSymbol(symbol);
-    if (context.mode === "dry-run") {
-      const price = uiSymbol.startsWith("ETH") ? "3200.0" : uiSymbol.startsWith("DOGE") ? "0.18" : "65000.0";
-      return { symbol: uiSymbol, price, time: now(), fallback: true };
-    }
+    if (useMockMarketData(context)) return mockTicker(uiSymbol);
 
     const apiSymbol = toApiSymbol(symbol);
     this.ensureMarketDataStream(context, uiSymbol);
     const cached = this.cachedTicker(uiSymbol);
     if (cached) return cached;
 
-    const payload = await this.request(context, "GET", `/v1/public/futures/${encodeURIComponent(apiSymbol)}`);
-    const row = Array.isArray(payload.data?.rows) ? payload.data.rows[0] : payload.data;
-    const price = row?.last_price ?? row?.mark_price ?? row?.index_price;
-    return { symbol: uiSymbol, price: String(price), time: payload.timestamp || now() };
+    try {
+      const payload = await this.request(context, "GET", `/v1/public/futures/${encodeURIComponent(apiSymbol)}`);
+      const row = Array.isArray(payload.data?.rows) ? payload.data.rows[0] : payload.data;
+      const price = row?.last_price ?? row?.mark_price ?? row?.index_price;
+      return { symbol: uiSymbol, price: String(price), time: payload.timestamp || now(), source: "rest" };
+    } catch (error) {
+      throw error;
+    }
   }
 
   async getKlines(context, { symbol, interval = "15s", limit = 180 }) {
     const uiSymbol = toUiSymbol(symbol);
     const numericLimit = Math.max(1, Math.min(1000, Number(limit) || 180));
-    if (context.mode === "dry-run") {
+    if (useMockMarketData(context)) {
       const ticker = await this.getTicker(context, uiSymbol).catch(() => ({ price: "65000" }));
       return buildMockKlines(Math.min(interval === "15s" ? 240 : 1000, numericLimit), intervalMs(interval), ticker.price);
     }
@@ -1198,20 +1231,18 @@ export class MememaxOrderlyAdapter {
       } catch (error) {
         const cachedRows = this.cachedKlines(uiSymbol, "15s", numericLimit);
         if (cachedRows.length) return cachedRows;
-        if (context.mode !== "dry-run") throw error;
-        const ticker = await this.getTicker(context, uiSymbol).catch(() => ({ price: "65000" }));
-        return buildMockKlines(Math.min(240, numericLimit), FIFTEEN_SECONDS_MS, ticker.price);
+        throw error;
       }
     }
 
     this.ensureKlineStream(context, uiSymbol, interval);
     try {
-      const signed = context.mode !== "dry-run" && hasSignCredentials(context);
+      const signed = hasSignCredentials(context);
       const payload = await this.request(context, "GET", "/v1/kline", {
         symbol: toApiSymbol(uiSymbol),
         type: interval,
         limit: numericLimit
-      }, { signed });
+      }, { signed, allowDryRunSignedReadOnly: true });
       return mergeKlineRows(
         (payload.data?.rows || []).map(mapKline),
         this.cachedKlines(uiSymbol, interval, numericLimit),
@@ -1220,59 +1251,30 @@ export class MememaxOrderlyAdapter {
     } catch (error) {
       const cachedRows = this.cachedKlines(uiSymbol, interval, numericLimit);
       if (cachedRows.length) return cachedRows;
-      if (context.mode !== "dry-run") throw error;
-      return buildMockKlines(numericLimit);
+      throw error;
     }
   }
 
   async getOrderBook(context, { symbol, limit = 20 }) {
     const uiSymbol = toUiSymbol(symbol);
-    if (context.mode === "dry-run") {
-      const mid = uiSymbol.startsWith("ETH") ? 3200 : uiSymbol.startsWith("DOGE") ? 0.18 : 65000;
-      const tick = uiSymbol.startsWith("DOGE") ? 0.0001 : uiSymbol.startsWith("ETH") ? 0.1 : 1;
-      return {
-        lastUpdateId: now(),
-        bids: Array.from({ length: limit }, (_, index) => [
-          trimDecimal(mid - tick * (index + 1)),
-          trimDecimal(0.4 + index * 0.11)
-        ]),
-        asks: Array.from({ length: limit }, (_, index) => [
-          trimDecimal(mid + tick * (index + 1)),
-          trimDecimal(0.35 + index * 0.09)
-        ]),
-        source: "dry-run"
-      };
-    }
+    if (useMockMarketData(context)) return { ...mockOrderBook(uiSymbol, limit), source: "mock" };
 
     this.ensureMarketDataStream(context, uiSymbol);
     const cached = this.cachedOrderBook(uiSymbol, limit);
     if (cached) return cached;
 
     try {
-      const signed = context.mode !== "dry-run" && hasSignCredentials(context);
+      const signed = hasSignCredentials(context);
       const payload = await this.request(context, "GET", `/v1/orderbook/${encodeURIComponent(toApiSymbol(uiSymbol))}`, {
         max_level: limit
-      }, { signed });
+      }, { signed, allowDryRunSignedReadOnly: true });
       return {
         lastUpdateId: payload.data?.timestamp || payload.timestamp || now(),
         bids: normalizeOrderBookSide(payload.data?.bids),
         asks: normalizeOrderBookSide(payload.data?.asks)
       };
     } catch (error) {
-      if (context.mode !== "dry-run") throw error;
-      const mid = uiSymbol.startsWith("ETH") ? 3200 : 65000;
-      const tick = uiSymbol.startsWith("ETH") ? 0.1 : 1;
-      return {
-        lastUpdateId: now(),
-        bids: Array.from({ length: limit }, (_, index) => [
-          trimDecimal(mid - tick * (index + 1)),
-          trimDecimal(0.4 + index * 0.11)
-        ]),
-        asks: Array.from({ length: limit }, (_, index) => [
-          trimDecimal(mid + tick * (index + 1)),
-          trimDecimal(0.35 + index * 0.09)
-        ])
-      };
+      throw error;
     }
   }
 
