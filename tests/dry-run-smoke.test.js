@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -73,20 +74,88 @@ function stopServer(child) {
   });
 }
 
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body)
+  });
+  res.end(body);
+}
+
+async function readRequestBody(req) {
+  let body = "";
+  for await (const chunk of req) body += chunk;
+  return body ? JSON.parse(body) : {};
+}
+
+async function startFakeOrderly() {
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url, "http://127.0.0.1");
+      if (req.method === "GET" && url.pathname === "/v1/registration_nonce") {
+        sendJson(res, 200, {
+          success: true,
+          data: { registration_nonce: "194528949540" },
+          timestamp: Date.now()
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/v1/register_account") {
+        const body = await readRequestBody(req);
+        requests.push({ path: url.pathname, body });
+        sendJson(res, 200, {
+          success: true,
+          data: { account_id: "0xwalletorderlyaccount" },
+          timestamp: Date.now()
+        });
+        return;
+      }
+      if (req.method === "POST" && url.pathname === "/v1/orderly_key") {
+        const body = await readRequestBody(req);
+        requests.push({ path: url.pathname, body });
+        sendJson(res, 200, {
+          success: true,
+          data: { orderly_key: body.message?.orderlyKey, id: 1 },
+          timestamp: Date.now()
+        });
+        return;
+      }
+      sendJson(res, 404, { success: false, message: "Not found" });
+    } catch (error) {
+      sendJson(res, 500, { success: false, message: error.message });
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    requests,
+    close: () => new Promise((resolve) => server.close(resolve))
+  };
+}
+
 test("dry-run HTTP smoke covers core validation flows without credentials", async (t) => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "semi-auto-dry-run-"));
   const sessionEnv = path.join(tempDir, ".env.session");
   const baseEnv = path.join(tempDir, ".env");
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  const fakeOrderly = await startFakeOrderly();
 
   await writeFile(sessionEnv, [
     "SESSION_EXCHANGE_ID=mememax-orderly",
     "TRADING_MODE=dry-run",
     "LIVE_UNLOCK_PHRASE=",
+    "MEMEMAX_ORDERLY_BROKER_ID=test_broker",
     "MEMEMAX_ORDERLY_ACCOUNT_ID=",
     "MEMEMAX_ORDERLY_KEY=",
     "MEMEMAX_ORDERLY_SECRET=",
+    `MEMEMAX_ORDERLY_BASE_URL=${fakeOrderly.baseUrl}`,
     "ORDERLY_ACCOUNT_ID=",
     "ORDERLY_KEY=",
     "ORDERLY_SECRET=",
@@ -129,6 +198,7 @@ test("dry-run HTTP smoke covers core validation flows without credentials", asyn
 
   t.after(async () => {
     await stopServer(child);
+    await fakeOrderly.close();
     await rm(tempDir, { recursive: true, force: true });
   });
 
@@ -279,4 +349,55 @@ test("dry-run HTTP smoke covers core validation flows without credentials", asyn
   snapshot = await requestJson(baseUrl, "/api/account/snapshot?symbol=BTCUSDC");
   assert.equal(snapshot.positions.length, 0);
   assert.equal(snapshot.orders.length, 0);
+
+  const walletAddress = "0x1111111111111111111111111111111111111111";
+  const prepared = await requestJson(baseUrl, "/api/wallet/orderly/prepare", {
+    method: "POST",
+    body: { userAddress: walletAddress, chainId: "0x66eee" }
+  });
+  assert.equal(prepared.brokerId, "test_broker");
+  assert.equal(prepared.registrationTypedData.primaryType, "Registration");
+  assert.equal(prepared.addKeyTypedData.primaryType, "AddOrderlyKey");
+  assert.match(prepared.orderlyKey, /^ed25519:/);
+  assert.equal(prepared.orderlySecret, undefined);
+
+  const fakeSignature = `0x${"11".repeat(65)}`;
+  const completed = await requestJson(baseUrl, "/api/wallet/orderly/complete", {
+    method: "POST",
+    body: {
+      flowId: prepared.flowId,
+      userAddress: walletAddress,
+      registrationSignature: fakeSignature,
+      addKeySignature: fakeSignature
+    }
+  });
+  assert.equal(completed.saved, true);
+  assert.equal(completed.mode, "dry-run");
+  assert.equal(completed.orderlySecret, undefined);
+  assert.equal(fakeOrderly.requests.length, 2);
+  assert.equal(fakeOrderly.requests[0].path, "/v1/register_account");
+  assert.equal(fakeOrderly.requests[1].path, "/v1/orderly_key");
+
+  const savedSessionEnv = await readFile(sessionEnv, "utf8");
+  assert.match(savedSessionEnv, /MEMEMAX_ORDERLY_ACCOUNT_ID=0xwalletorderlyaccount/);
+  assert.match(savedSessionEnv, /MEMEMAX_ORDERLY_KEY=ed25519:/);
+  assert.match(savedSessionEnv, /MEMEMAX_ORDERLY_SECRET=/);
+  assert.match(savedSessionEnv, /MEMEMAX_ORDERLY_WALLET_ADDRESS=0x1111111111111111111111111111111111111111/);
+  assert.match(savedSessionEnv, /MEMEMAX_ORDERLY_KEY_CREATED_AT=\d+/);
+  assert.match(savedSessionEnv, /MEMEMAX_ORDERLY_KEY_EXPIRES_AT=\d+/);
+
+  const connectedSession = await requestJson(baseUrl, "/api/session");
+  assert.equal(connectedSession.mode, "dry-run");
+  assert.equal(connectedSession.hasApiKey, true);
+  assert.equal(connectedSession.hasApiSecret, true);
+  assert.equal(connectedSession.walletOnboarding.orderly.tradeReady, true);
+  assert.equal(connectedSession.walletOnboarding.orderly.keyExpired, false);
+
+  const reused = await requestJson(baseUrl, "/api/wallet/orderly/prepare", {
+    method: "POST",
+    body: { userAddress: walletAddress, chainId: "0x66eee" }
+  });
+  assert.equal(reused.reused, true);
+  assert.equal(reused.saved, true);
+  assert.equal(fakeOrderly.requests.length, 2);
 });

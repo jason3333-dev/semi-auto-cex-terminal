@@ -53,7 +53,17 @@ async function createRetailFixture() {
     ["app/public/styles.css", "body { color: #111; }\n"],
     ["app/package.json", "{\"type\":\"module\"}\n"],
     ["app/.env.example", "PORT=8787\n"],
-    ["app/.env.session.example", "MEMEMAX_ORDERLY_SECRET=\nBINANCE_API_KEY=\nTRADING_MODE=dry-run\n"],
+    [
+      "app/.env.session.example",
+      [
+        "MEMEMAX_ORDERLY_SECRET=",
+        "BINANCE_API_KEY=",
+        "TRADING_MODE=dry-run",
+        "MEMEMAX_ORDERLY_KEY_SCOPE=read,trading",
+        "MEMEMAX_ORDERLY_KEY_EXPIRATION_DAYS=365",
+        ""
+      ].join("\n")
+    ],
     ["app/README.md", "# Retail app\n"],
     ["README.txt", "Retail package\n"]
   ]);

@@ -196,6 +196,22 @@ function formatOrderlyKey(configuredKey, privateKey) {
   return `${ORDERLY_KEY_PREFIX}${base58Encode(publicKeyFromPrivateKey(privateKey))}`;
 }
 
+export function generateOrderlyKeyPair() {
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const der = Buffer.from(privateKey.export({ format: "der", type: "pkcs8" }));
+  if (!der.subarray(0, ED25519_PKCS8_PREFIX.length).equals(ED25519_PKCS8_PREFIX)) {
+    throw new ExchangeError("Unexpected ed25519 private key encoding");
+  }
+  const seed = der.subarray(ED25519_PKCS8_PREFIX.length);
+  if (seed.length !== 32) {
+    throw new ExchangeError("Generated Orderly secret is not a 32-byte ed25519 seed");
+  }
+  return {
+    orderlyKey: `${ORDERLY_KEY_PREFIX}${base58Encode(publicKeyFromPrivateKey(privateKey))}`,
+    orderlySecret: base58Encode(seed)
+  };
+}
+
 function credentialsFromContext(context) {
   return {
     accountId: context.credentials?.accountId || "",

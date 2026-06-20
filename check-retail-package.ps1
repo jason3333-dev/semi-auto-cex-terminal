@@ -146,6 +146,10 @@ function Test-SecretMarkers {
   )
 
   $textExtensions = @(".css", ".cs", ".env", ".example", ".html", ".js", ".json", ".md", ".ps1", ".txt")
+  $allowedEnvSecretLikeKeys = @(
+    "MEMEMAX_ORDERLY_KEY_SCOPE",
+    "MEMEMAX_ORDERLY_KEY_EXPIRATION_DAYS"
+  )
   $envSecretPattern = "^\s*(?<key>[A-Z0-9_]*(API_KEY|API_SECRET|ORDERLY_KEY|ORDERLY_SECRET|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|ACCOUNT_ID)[A-Z0-9_]*)\s*=\s*(?<value>.+?)\s*$"
   $literalSecretPattern = "(?i)(apiKey|apiSecret|orderlyKey|orderlySecret|accountId|token|password|privateKey|secret)\s*[:=]\s*[""'](?<value>[^""']{8,})[""']"
 
@@ -167,6 +171,10 @@ function Test-SecretMarkers {
       }
 
       if ($trimmed -match $envSecretPattern) {
+        $key = $Matches["key"]
+        if ($allowedEnvSecretLikeKeys -contains $key) {
+          continue
+        }
         $value = $Matches["value"]
         if (-not (Test-AllowedPlaceholder $value)) {
           Add-Failure "$Label contains sensitive assignment marker: ${relativePath}:$lineNumber"

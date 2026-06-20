@@ -17,6 +17,9 @@ const ui = {
   modeBadge: $("#modeBadge"),
   riskBadge: $("#riskBadge"),
   connectionLabel: $("#connectionLabel"),
+  walletConnectButton: $("#walletConnectButton"),
+  walletOrderlyButton: $("#walletOrderlyButton"),
+  walletStatus: $("#walletStatus"),
   refreshButton: $("#refreshButton"),
   symbolInput: $("#symbolInput"),
   symbolOptions: $("#symbolOptions"),
@@ -84,6 +87,16 @@ const app = {
   accountRefreshDelayTimer: null,
   accountRefreshInFlight: false,
   priceTimer: null,
+  wallet: {
+    address: "",
+    chainId: "",
+    available: false,
+    providerEventsBound: false,
+    orderlyBusy: false,
+    autoActivationKey: "",
+    autoActivationInFlight: false,
+    error: ""
+  },
   chartApi: null,
   candleSeries: null,
   volumeSeries: null,
@@ -243,6 +256,210 @@ function escapeHtml(value) {
     "\"": "&quot;",
     "'": "&#39;"
   }[char]));
+}
+
+function shortAddress(address) {
+  const text = String(address || "").trim();
+  return text.length > 12 ? `${text.slice(0, 6)}...${text.slice(-4)}` : text || "-";
+}
+
+function walletProvider() {
+  return typeof window !== "undefined" ? window.ethereum : null;
+}
+
+function renderWalletStatus() {
+  if (!ui.walletConnectButton || !ui.walletStatus) return;
+  const wallet = app.wallet;
+  const orderly = app.session?.walletOnboarding?.orderly;
+  ui.walletStatus.className = "wallet-status";
+  if (ui.walletOrderlyButton) {
+    const tradeReady = Boolean(orderly?.tradeReady);
+    const keyExpired = orderly?.keyExpired === true;
+    const brokerReady = orderly?.brokerIdConfigured === true;
+    ui.walletOrderlyButton.textContent = wallet.orderlyBusy
+      ? "활성화 중"
+      : tradeReady
+        ? "MemeMax 활성"
+        : keyExpired
+          ? "키 갱신"
+          : "거래 활성화";
+    ui.walletOrderlyButton.disabled = wallet.orderlyBusy || !wallet.available || !wallet.address || !brokerReady;
+    ui.walletOrderlyButton.title = brokerReady
+      ? tradeReady
+        ? "기존 MemeMax Orderly API 키를 재사용합니다"
+        : "지갑 서명으로 MemeMax Orderly API 키를 생성하고 .env.session에 저장합니다"
+      : "MEMEMAX_ORDERLY_BROKER_ID를 .env.session에 먼저 설정하세요";
+  }
+
+  if (!wallet.available) {
+    ui.walletConnectButton.textContent = "지갑 연결";
+    ui.walletConnectButton.disabled = true;
+    ui.walletStatus.textContent = "브라우저 지갑 없음";
+    ui.walletStatus.classList.add("wallet-muted");
+    return;
+  }
+
+  ui.walletConnectButton.disabled = false;
+  if (wallet.address) {
+    ui.walletConnectButton.textContent = "지갑 해제";
+    ui.walletStatus.textContent = `${shortAddress(wallet.address)}${wallet.chainId ? ` · ${wallet.chainId}` : ""}`;
+    ui.walletStatus.classList.add("wallet-connected");
+    ui.walletStatus.title = wallet.address;
+    return;
+  }
+
+  ui.walletConnectButton.textContent = "지갑 연결";
+  ui.walletStatus.textContent = wallet.error || "지갑 미연결";
+  ui.walletStatus.classList.add(wallet.error ? "wallet-error" : "wallet-muted");
+  ui.walletStatus.title = "";
+}
+
+async function readWalletChainId(provider) {
+  try {
+    return await provider.request({ method: "eth_chainId" });
+  } catch {
+    return "";
+  }
+}
+
+async function syncWalletAccounts({ requestAccess = false } = {}) {
+  const provider = walletProvider();
+  app.wallet.available = Boolean(provider?.request);
+  app.wallet.error = "";
+  if (!app.wallet.available) {
+    app.wallet.address = "";
+    app.wallet.chainId = "";
+    renderWalletStatus();
+    return;
+  }
+
+  try {
+    const accounts = await provider.request({
+      method: requestAccess ? "eth_requestAccounts" : "eth_accounts"
+    });
+    app.wallet.address = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : "";
+    app.wallet.chainId = await readWalletChainId(provider);
+  } catch (error) {
+    app.wallet.address = "";
+    app.wallet.error = error?.message || "지갑 연결 실패";
+  }
+  renderWalletStatus();
+}
+
+function disconnectWallet() {
+  app.wallet.address = "";
+  app.wallet.error = "";
+  app.wallet.autoActivationKey = "";
+  app.wallet.autoActivationInFlight = false;
+  renderWalletStatus();
+}
+
+async function toggleWalletConnection() {
+  if (app.wallet.address) {
+    disconnectWallet();
+    toast("지갑 연결을 화면에서 해제했습니다");
+    return;
+  }
+  await syncWalletAccounts({ requestAccess: true });
+  if (app.wallet.address) {
+    toast(`지갑 연결 ${shortAddress(app.wallet.address)}`);
+    await autoActivateMemeMaxWallet();
+  } else if (app.wallet.error) {
+    toast(app.wallet.error, true);
+  }
+}
+
+async function signOrderlyTypedData(typedData) {
+  return signWalletTypedData(typedData);
+}
+
+async function signWalletTypedData(typedData) {
+  const provider = walletProvider();
+  if (!provider?.request || !app.wallet.address) {
+    throw new Error("Wallet is not connected");
+  }
+  return provider.request({
+    method: "eth_signTypedData_v4",
+    params: [app.wallet.address, JSON.stringify(typedData)]
+  });
+}
+
+async function setupOrderlyWalletEnv() {
+  if (!app.wallet.address) {
+    await syncWalletAccounts({ requestAccess: true });
+  }
+  if (!app.wallet.address) throw new Error("Wallet is not connected");
+  app.wallet.orderlyBusy = true;
+  renderWalletStatus();
+  try {
+    const chainId = app.wallet.chainId || await readWalletChainId(walletProvider());
+    const prepared = await post("/api/wallet/orderly/prepare", {
+      userAddress: app.wallet.address,
+      chainId
+    });
+    if (prepared.reused) {
+      await loadSession();
+      toast("기존 MemeMax 키 재사용");
+      return;
+    }
+    const registrationSignature = prepared.registrationTypedData
+      ? await signOrderlyTypedData(prepared.registrationTypedData)
+      : "";
+    const addKeySignature = await signOrderlyTypedData(prepared.addKeyTypedData);
+    await post("/api/wallet/orderly/complete", {
+      flowId: prepared.flowId,
+      userAddress: app.wallet.address,
+      registrationSignature,
+      addKeySignature
+    });
+    await loadSession();
+    toast("MemeMax 거래 활성화 완료");
+  } finally {
+    app.wallet.orderlyBusy = false;
+    renderWalletStatus();
+  }
+}
+
+async function autoActivateMemeMaxWallet() {
+  const orderly = app.session?.walletOnboarding?.orderly;
+  if (!orderly?.brokerIdConfigured || orderly.tradeReady) return;
+  if (!app.wallet.available || !app.wallet.address || app.wallet.orderlyBusy || app.wallet.autoActivationInFlight) return;
+
+  const activationKey = `${app.wallet.address.toLowerCase()}:${orderly.keyExpired ? "expired" : "missing"}`;
+  if (app.wallet.autoActivationKey === activationKey) return;
+  app.wallet.autoActivationKey = activationKey;
+  app.wallet.autoActivationInFlight = true;
+  try {
+    await setupOrderlyWalletEnv();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    app.wallet.autoActivationInFlight = false;
+  }
+}
+
+function bindWalletProviderEvents() {
+  const provider = walletProvider();
+  if (!provider?.on || app.wallet.providerEventsBound) return;
+  app.wallet.providerEventsBound = true;
+  provider.on("accountsChanged", (accounts) => {
+    app.wallet.address = Array.isArray(accounts) && accounts[0] ? String(accounts[0]) : "";
+    app.wallet.error = "";
+    renderWalletStatus();
+  });
+  provider.on("chainChanged", (chainId) => {
+    app.wallet.chainId = String(chainId || "");
+    renderWalletStatus();
+  });
+}
+
+function resyncWalletProvider() {
+  app.wallet.providerEventsBound = false;
+  bindWalletProviderEvents();
+  syncWalletAccounts().catch((error) => {
+    app.wallet.error = error.message;
+    renderWalletStatus();
+  });
 }
 
 function currentSymbol() {
@@ -704,11 +921,13 @@ function renderSession() {
   ui.connectionLabel.textContent = session.hasApiKey
     ? `${exchangeLabel} · ${marketDataMode} · API ${session.apiKeyPreview}`
     : `${exchangeLabel} · ${marketDataMode} · API 키 없음`;
+  renderWalletStatus();
 }
 
 async function loadSession() {
   app.session = await request("/api/session");
   renderSession();
+  autoActivateMemeMaxWallet().catch((error) => toast(error.message, true));
 }
 
 async function loadSymbols() {
@@ -1614,6 +1833,13 @@ function scheduleSymbolApply() {
 
 function bindEvents() {
   ui.refreshButton.addEventListener("click", refreshAll);
+  ui.walletConnectButton?.addEventListener("click", () => {
+    toggleWalletConnection().catch((error) => toast(error.message, true));
+  });
+  ui.walletOrderlyButton?.addEventListener("click", () => {
+    setupOrderlyWalletEnv().catch((error) => toast(error.message, true));
+  });
+  window.addEventListener("ethereum#initialized", resyncWalletProvider, { once: true });
   ui.symbolInput.addEventListener("input", () => {
     ui.symbolInput.value = normalizedSymbolInput();
     scheduleSymbolApply();
@@ -1696,6 +1922,11 @@ function bindEvents() {
 
 async function boot() {
   bindEvents();
+  bindWalletProviderEvents();
+  await syncWalletAccounts();
+  window.setTimeout(() => {
+    if (!app.wallet.available) resyncWalletProvider();
+  }, 800);
   initChart();
   await loadSession();
   connectAccountEvents();

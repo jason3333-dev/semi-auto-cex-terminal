@@ -102,6 +102,12 @@ TRADING_MODE=dry-run
 MEMEMAX_ORDERLY_ACCOUNT_ID=
 MEMEMAX_ORDERLY_KEY=
 MEMEMAX_ORDERLY_SECRET=
+MEMEMAX_ORDERLY_BROKER_ID=
+MEMEMAX_ORDERLY_WALLET_ADDRESS=
+MEMEMAX_ORDERLY_KEY_SCOPE=read,trading
+MEMEMAX_ORDERLY_KEY_EXPIRATION_DAYS=365
+MEMEMAX_ORDERLY_KEY_CREATED_AT=
+MEMEMAX_ORDERLY_KEY_EXPIRES_AT=
 MEMEMAX_ORDER_TAG=
 MEMEMAX_ORDERLY_BASE_URL=
 MEMEMAX_ORDERLY_TESTNET_BASE_URL=
@@ -146,6 +152,14 @@ CHART_VWAP_PERIOD=80
 
 `MEMEMAX_ORDERLY_KEY`는 secret에서 유도할 수 있는 경우 생략할 수 있습니다. `TRADING_MODE=dry-run`이어도 `MEMEMAX_MARKET_DATA_MODE=live`가 기본이라 차트, last, 호가는 Orderly public live market data만 사용합니다. live public 요청이 실패하면 mock 가격으로 조용히 대체하지 않고 오류를 표시합니다. 오프라인 데모나 테스트만 `MEMEMAX_MARKET_DATA_MODE=mock`으로 바꿉니다. `live`를 영구 설정하려면 `LIVE_UNLOCK_PHRASE=I_ACCEPT_LIVE_RISK`가 필요합니다.
 
+## 지갑 기반 거래 활성화
+
+상단의 `지갑 연결`로 브라우저 지갑을 연결하면 MemeMax Orderly 계정 등록과 API 키 생성을 자동으로 진행합니다. 필요한 경우 브라우저 지갑의 권한/서명 모달이 뜨며, `거래 활성화` 버튼으로 같은 흐름을 수동 재시도할 수도 있습니다. 생성된 account id, orderly key, secret, 지갑 주소, 생성/만료 시각은 로컬 `.env.session`에만 저장됩니다.
+
+이미 `.env.session`에 같은 지갑의 유효한 MemeMax Orderly 키가 있으면 새 키를 만들지 않고 재사용합니다. 키가 만료되었거나 저장된 지갑과 현재 지갑이 다르면 지갑 서명 모달을 통해 새 키를 발급합니다.
+
+이 터미널은 실거래용이므로 온보딩은 **항상 Orderly 메인넷(`https://api.orderly.org`, 또는 `MEMEMAX_ORDERLY_BASE_URL`)** 으로만 키를 발급합니다. testnet으로는 전환하지 않습니다. 온보딩 후 거래 모드는 라이브 안전장치를 따릅니다. `.env`에 `LIVE_UNLOCK_PHRASE=I_ACCEPT_LIVE_RISK`가 설정돼 있으면 온보딩 완료 시 `live`(실거래)로 전환되고, 설정돼 있지 않으면 메인넷 키만 저장한 채 `dry-run`을 유지합니다(실주문은 나가지 않음). 실거래를 하려면 `LIVE_UNLOCK_PHRASE`를 먼저 설정하세요.
+
 ## MemeMax Orderly 기준
 
 구현 기준은 Orderly EVM API입니다.
@@ -161,20 +175,15 @@ CHART_VWAP_PERIOD=80
 
 5분 봉을 기본으로 사용합니다. 15초 봉은 Orderly의 1분 kline과 trade/ticker stream을 합쳐 로컬에서 합성합니다.
 
+공식 문서 링크와 API 에러 코드는 [`docs/orderly-api.md`](docs/orderly-api.md)에 정리해 두었습니다.
+
 ## 차트 엔진
 
 차트는 TradingView Lightweight Charts v5.0.8 standalone 파일을 `public/vendor/`에 vendoring해서 사용합니다. 포터블 실행 파일에서도 인터넷 없이 동작하며, 라이브러리 라이선스 파일은 `public/vendor/lightweight-charts.LICENSE.txt`에 포함되어 있습니다. TradingView attribution logo는 차트 옵션에서 켜 둡니다.
 
-## 기타 어댑터
+## 지원 범위
 
-기존 보조 어댑터는 `src/exchanges/` 아래에 남아 있지만, 문서와 기본 실행 기준은 MemeMax Orderly입니다. 다른 거래소를 쓰려면 `.env.session`에서 `SESSION_EXCHANGE_ID`를 명시하고 해당 API 키를 별도로 설정합니다.
-
-## 다른 거래소 추가
-
-1. `src/exchanges/types.js`의 어댑터 계약을 맞춥니다.
-2. `src/exchanges/<exchange>.js` 파일을 추가합니다.
-3. `src/exchanges/registry.js`에 등록합니다.
-4. UI는 `/api/symbols`, `/api/market/*`, `/api/account/*`, `/api/trade/*` 계약을 통해 같은 방식으로 동작합니다.
+현재 배포와 UI는 MemeMax Orderly 전용입니다. 다른 CEX 어댑터는 이 빌드의 활성 경로에 포함하지 않습니다.
 
 ## 안전 메모
 

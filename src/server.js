@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -5,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { extractPrivateOrderUpdate, uiSymbolFromExchangeSymbol } from "./account-stream-normalizers.js";
 import { createAuditLogger, defaultAuditLogPath } from "./audit-log.js";
 import { getExchange, listExchanges } from "./exchanges/registry.js";
+import { generateOrderlyKeyPair } from "./exchanges/mememax-orderly.js";
 import { ExchangeError } from "./exchanges/types.js";
 import {
   LIVE_UNLOCK_PHRASE,
@@ -31,6 +33,44 @@ function argValue(name) {
 const BASE_ENV_PATH = path.resolve(argValue("--base-env") || path.join(ROOT_DIR, ".env"));
 const SESSION_ENV_PATH = path.resolve(argValue("--session-env") || path.join(ROOT_DIR, ".env.session"));
 const MAX_BODY_BYTES = 1024 * 1024;
+const ORDERLY_MAINNET_BASE_URL = "https://api.orderly.org";
+const ORDERLY_OFFCHAIN_VERIFYING_CONTRACT = "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC";
+const ORDERLY_WALLET_FLOW_TTL_MS = 2 * 60 * 1000;
+const ORDERLY_WALLET_TYPES = Object.freeze({
+  EIP712Domain: [
+    { name: "name", type: "string" },
+    { name: "version", type: "string" },
+    { name: "chainId", type: "uint256" },
+    { name: "verifyingContract", type: "address" }
+  ],
+  Registration: [
+    { name: "brokerId", type: "string" },
+    { name: "chainId", type: "uint256" },
+    { name: "timestamp", type: "uint64" },
+    { name: "registrationNonce", type: "uint256" }
+  ],
+  AddOrderlyKey: [
+    { name: "brokerId", type: "string" },
+    { name: "chainId", type: "uint256" },
+    { name: "orderlyKey", type: "string" },
+    { name: "scope", type: "string" },
+    { name: "timestamp", type: "uint64" },
+    { name: "expiration", type: "uint64" }
+  ]
+});
+const SESSION_ENV_WRITABLE_KEYS = new Set([
+  "SESSION_EXCHANGE_ID",
+  "TRADING_MODE",
+  "MEMEMAX_ORDERLY_WALLET_ADDRESS",
+  "MEMEMAX_ORDERLY_ACCOUNT_ID",
+  "MEMEMAX_ORDERLY_KEY",
+  "MEMEMAX_ORDERLY_SECRET",
+  "MEMEMAX_ORDERLY_BROKER_ID",
+  "MEMEMAX_ORDERLY_KEY_SCOPE",
+  "MEMEMAX_ORDERLY_KEY_EXPIRATION_DAYS",
+  "MEMEMAX_ORDERLY_KEY_CREATED_AT",
+  "MEMEMAX_ORDERLY_KEY_EXPIRES_AT"
+]);
 
 function parseEnvValue(value) {
   const trimmed = value.trim();
@@ -100,6 +140,54 @@ function loadDotEnv() {
 }
 
 const ENV_LOAD_REPORT = loadDotEnv();
+
+function envLineValue(value) {
+  const text = String(value ?? "");
+  if (/[\r\n]/.test(text)) {
+    throw new ExchangeError("Env values cannot contain newlines");
+  }
+  return text;
+}
+
+function updateSessionEnv(updates) {
+  const entries = Object.entries(updates)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => [key, envLineValue(value)]);
+  for (const [key] of entries) {
+    if (!SESSION_ENV_WRITABLE_KEYS.has(key)) {
+      throw new ExchangeError(`Refusing to write unsupported session env key: ${key}`);
+    }
+  }
+
+  const existingText = fs.existsSync(SESSION_ENV_PATH) ? readEnvText(SESSION_ENV_PATH) : "";
+  const eol = existingText.includes("\r\n") ? "\r\n" : "\n";
+  const lines = existingText ? existingText.split(/\r?\n/) : [];
+  const remaining = new Map(entries);
+  const nextLines = lines.map((line) => {
+    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+    if (!match || !remaining.has(match[1])) return line;
+    const value = remaining.get(match[1]);
+    remaining.delete(match[1]);
+    return `${match[1]}=${value}`;
+  });
+
+  if (remaining.size) {
+    if (nextLines.length && nextLines[nextLines.length - 1] !== "") nextLines.push("");
+    for (const [key, value] of remaining) {
+      nextLines.push(`${key}=${value}`);
+    }
+  }
+
+  fs.mkdirSync(path.dirname(SESSION_ENV_PATH), { recursive: true });
+  fs.writeFileSync(SESSION_ENV_PATH, nextLines.join(eol).replace(/\s*$/, eol), "utf8");
+  for (const [key, value] of entries) {
+    process.env[key] = value;
+  }
+  return {
+    file: path.basename(SESSION_ENV_PATH),
+    keyCount: entries.length
+  };
+}
 
 function envNumber(name, fallback) {
   const parsed = Number(process.env[name]);
@@ -172,17 +260,18 @@ const ORDER_AUDIT_LOG_PATH = path.resolve(
 const auditLogger = createAuditLogger({ filePath: ORDER_AUDIT_LOG_PATH });
 
 const state = {
-  exchangeId: process.env.SESSION_EXCHANGE_ID || process.env.EXCHANGE_ID || "mememax-orderly",
+  exchangeId: "mememax-orderly",
   mode: process.env.TRADING_MODE || "dry-run",
   credentialsByExchange: {
-    "binance-usdm": {
-      apiKey: process.env.BINANCE_API_KEY || "",
-      apiSecret: process.env.BINANCE_API_SECRET || ""
-    },
     "mememax-orderly": {
+      walletAddress: process.env.MEMEMAX_ORDERLY_WALLET_ADDRESS || "",
       accountId: process.env.MEMEMAX_ORDERLY_ACCOUNT_ID || process.env.ORDERLY_ACCOUNT_ID || "",
       orderlyKey: process.env.MEMEMAX_ORDERLY_KEY || process.env.ORDERLY_KEY || "",
       orderlySecret: process.env.MEMEMAX_ORDERLY_SECRET || process.env.ORDERLY_SECRET || "",
+      brokerId: process.env.MEMEMAX_ORDERLY_BROKER_ID || process.env.ORDERLY_BROKER_ID || "",
+      keyScope: process.env.MEMEMAX_ORDERLY_KEY_SCOPE || process.env.ORDERLY_KEY_SCOPE || "",
+      keyCreatedAt: process.env.MEMEMAX_ORDERLY_KEY_CREATED_AT || "",
+      keyExpiresAt: process.env.MEMEMAX_ORDERLY_KEY_EXPIRES_AT || "",
       orderTag: process.env.MEMEMAX_ORDER_TAG || "",
       baseUrl: process.env.MEMEMAX_ORDERLY_BASE_URL || "",
       testnetBaseUrl: process.env.MEMEMAX_ORDERLY_TESTNET_BASE_URL || "",
@@ -209,7 +298,8 @@ const state = {
   logs: [],
   orderIntents: new Map(),
   chaseJobs: new Map(),
-  orderRateLimit: new Map()
+  orderRateLimit: new Map(),
+  orderlyWalletFlows: new Map()
 };
 
 function exchangeCredentials(exchangeId = state.exchangeId) {
@@ -221,29 +311,28 @@ function activeCredentials() {
 }
 
 function activeAccountMode() {
-  return state.exchangeId === "binance-usdm" ? BINANCE_ACCOUNT_MODE : "orderly";
+  return "orderly";
 }
 
 function activePositionMode() {
-  return state.exchangeId === "binance-usdm" ? BINANCE_POSITION_MODE : "one-way";
+  return "one-way";
 }
 
 function activeCredentialPreview(credentials = activeCredentials()) {
-  const value = credentials.apiKey || credentials.orderlyKey || credentials.accountId || "";
+  const value = credentials.orderlyKey || credentials.accountId || "";
   return value ? `${value.slice(0, 4)}...${value.slice(-4)}` : "";
 }
 
 function hasActiveApiKey(credentials = activeCredentials()) {
-  return Boolean(credentials.apiKey || credentials.orderlyKey || credentials.accountId);
+  return Boolean(credentials.orderlyKey || credentials.accountId);
 }
 
 function hasActiveApiSecret(credentials = activeCredentials()) {
-  return Boolean(credentials.apiSecret || credentials.orderlySecret);
+  return Boolean(credentials.orderlySecret);
 }
 
 function exchangeEnvPrefix(exchangeId = state.exchangeId) {
   if (exchangeId === "mememax-orderly") return "MEMEMAX_";
-  if (exchangeId === "binance-usdm") return "BINANCE_";
   return "";
 }
 
@@ -261,6 +350,116 @@ function envBooleanForExchange(name, fallback) {
     return envBoolean(scopedName, fallback);
   }
   return fallback;
+}
+
+function refreshMememaxOrderlyCredentials() {
+  state.credentialsByExchange["mememax-orderly"] = {
+    walletAddress: process.env.MEMEMAX_ORDERLY_WALLET_ADDRESS || "",
+    accountId: process.env.MEMEMAX_ORDERLY_ACCOUNT_ID || process.env.ORDERLY_ACCOUNT_ID || "",
+    orderlyKey: process.env.MEMEMAX_ORDERLY_KEY || process.env.ORDERLY_KEY || "",
+    orderlySecret: process.env.MEMEMAX_ORDERLY_SECRET || process.env.ORDERLY_SECRET || "",
+    brokerId: process.env.MEMEMAX_ORDERLY_BROKER_ID || process.env.ORDERLY_BROKER_ID || "",
+    keyScope: process.env.MEMEMAX_ORDERLY_KEY_SCOPE || process.env.ORDERLY_KEY_SCOPE || "",
+    keyCreatedAt: process.env.MEMEMAX_ORDERLY_KEY_CREATED_AT || "",
+    keyExpiresAt: process.env.MEMEMAX_ORDERLY_KEY_EXPIRES_AT || "",
+    orderTag: process.env.MEMEMAX_ORDER_TAG || "",
+    baseUrl: process.env.MEMEMAX_ORDERLY_BASE_URL || "",
+    testnetBaseUrl: process.env.MEMEMAX_ORDERLY_TESTNET_BASE_URL || "",
+    publicWsBaseUrl: process.env.MEMEMAX_ORDERLY_PUBLIC_WS_BASE_URL || "",
+    testnetPublicWsBaseUrl: process.env.MEMEMAX_ORDERLY_TESTNET_PUBLIC_WS_BASE_URL || "",
+    privateWsBaseUrl: process.env.MEMEMAX_ORDERLY_PRIVATE_WS_BASE_URL || "",
+    testnetPrivateWsBaseUrl: process.env.MEMEMAX_ORDERLY_TESTNET_PRIVATE_WS_BASE_URL || ""
+  };
+}
+
+function orderlyKeyScope() {
+  return String(process.env.MEMEMAX_ORDERLY_KEY_SCOPE || process.env.ORDERLY_KEY_SCOPE || "read,trading").trim() || "read,trading";
+}
+
+function orderlyKeyExpirationDays() {
+  const raw = process.env.MEMEMAX_ORDERLY_KEY_EXPIRATION_DAYS || process.env.ORDERLY_KEY_EXPIRATION_DAYS || "";
+  const parsed = Number(raw);
+  return Math.min(365, Math.max(1, Number.isFinite(parsed) && parsed > 0 ? parsed : 365));
+}
+
+function mememaxBrokerId() {
+  return String(
+    state.credentialsByExchange["mememax-orderly"]?.brokerId ||
+    process.env.MEMEMAX_ORDERLY_BROKER_ID ||
+    process.env.ORDERLY_BROKER_ID ||
+    ""
+  ).trim();
+}
+
+function normalizeBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function orderlyOnboardingBaseUrl() {
+  // This is a real-trading terminal: always onboard against Orderly mainnet so the
+  // generated API key works for live orders. Never fall back to testnet here.
+  const credentials = state.credentialsByExchange["mememax-orderly"] || {};
+  return normalizeBaseUrl(credentials.baseUrl || ORDERLY_MAINNET_BASE_URL);
+}
+
+function orderlyPersistedMode() {
+  // Onboarding must never silently move the terminal onto testnet. Respect the
+  // live-trading safety gate: go live only when LIVE_UNLOCK_PHRASE is set,
+  // otherwise stay in dry-run.
+  return state.liveUnlocked ? "live" : "dry-run";
+}
+
+function keyPreview(value) {
+  const text = String(value || "");
+  return text ? `${text.slice(0, 10)}...${text.slice(-6)}` : "";
+}
+
+function numericTimestamp(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function orderlyKeyStatus(credentials = state.credentialsByExchange["mememax-orderly"] || {}, userAddress = "") {
+  const nowMs = Date.now();
+  const expiresAt = numericTimestamp(credentials.keyExpiresAt);
+  const walletAddress = String(credentials.walletAddress || "").trim().toLowerCase();
+  const requestedWallet = String(userAddress || "").trim().toLowerCase();
+  const walletMatches = !requestedWallet || !walletAddress || walletAddress === requestedWallet;
+  const hasSecret = Boolean(credentials.accountId && credentials.orderlySecret);
+  const keyExpired = Boolean(expiresAt && expiresAt <= nowMs);
+  const tradeReady = hasSecret && walletMatches && !keyExpired;
+  return {
+    tradeReady,
+    hasSecret,
+    walletMatches,
+    keyExpired,
+    keyCreatedAt: numericTimestamp(credentials.keyCreatedAt),
+    keyExpiresAt: expiresAt,
+    walletAddress
+  };
+}
+
+function publicOrderlyWalletConfig() {
+  const credentials = state.credentialsByExchange["mememax-orderly"] || {};
+  const brokerId = mememaxBrokerId();
+  const keyStatus = orderlyKeyStatus(credentials);
+  return {
+    enabled: state.exchangeId === "mememax-orderly",
+    brokerIdConfigured: Boolean(brokerId),
+    brokerId,
+    scope: orderlyKeyScope(),
+    expirationDays: orderlyKeyExpirationDays(),
+    baseUrl: orderlyOnboardingBaseUrl(),
+    walletAddressPreview: keyPreview(credentials.walletAddress),
+    accountIdPreview: keyPreview(credentials.accountId),
+    orderlyKeyPreview: keyPreview(credentials.orderlyKey),
+    hasOrderlySecret: Boolean(credentials.orderlySecret),
+    tradeReady: keyStatus.tradeReady,
+    keyExpired: keyStatus.keyExpired,
+    keyCreatedAt: keyStatus.keyCreatedAt,
+    keyExpiresAt: keyStatus.keyExpiresAt,
+    sessionEnvFile: ".env.session"
+  };
 }
 
 function activeLiveRiskConfig() {
@@ -347,7 +546,10 @@ function auditKnownSecrets() {
     credentials.apiSecret,
     credentials.accountId,
     credentials.orderlyKey,
-    credentials.orderlySecret
+    credentials.orderlySecret,
+    credentials.accountAddress,
+    credentials.privateKey,
+    credentials.vaultAddress
   ].filter((value) => typeof value === "string" && value.length >= 4);
 }
 
@@ -455,6 +657,9 @@ function publicSession() {
     marketData: {
       mode: MARKET_DATA_MODE
     },
+    walletOnboarding: {
+      orderly: publicOrderlyWalletConfig()
+    },
     chartConfig: {
       vwapEnabled: CHART_VWAP_ENABLED,
       vwapPeriod: CHART_VWAP_PERIOD
@@ -527,6 +732,280 @@ function readBody(req) {
     });
     req.on("error", reject);
   });
+}
+
+function normalizeWalletAddress(value) {
+  const address = String(value || "").trim();
+  if (!/^0x[0-9a-fA-F]{40}$/.test(address)) {
+    throw new ExchangeError("A valid EVM wallet address is required");
+  }
+  return address;
+}
+
+function normalizeChainId(value) {
+  const text = String(value || "").trim();
+  const chainId = text.startsWith("0x") || text.startsWith("0X")
+    ? Number.parseInt(text, 16)
+    : Number(text);
+  if (!Number.isSafeInteger(chainId) || chainId <= 0) {
+    throw new ExchangeError("A valid wallet chain id is required");
+  }
+  return chainId;
+}
+
+function normalizeSignature(value, label) {
+  const signature = String(value || "").trim();
+  if (!/^0x[0-9a-fA-F]{130}$/.test(signature)) {
+    throw new ExchangeError(`${label} signature is invalid`);
+  }
+  return signature;
+}
+
+function orderlyTypedData(primaryType, chainId, message) {
+  return {
+    types: {
+      EIP712Domain: ORDERLY_WALLET_TYPES.EIP712Domain,
+      [primaryType]: ORDERLY_WALLET_TYPES[primaryType]
+    },
+    primaryType,
+    domain: {
+      name: "Orderly",
+      version: "1",
+      chainId,
+      verifyingContract: ORDERLY_OFFCHAIN_VERIFYING_CONTRACT
+    },
+    message
+  };
+}
+
+function pruneExpiredOrderlyWalletFlows() {
+  const nowMs = Date.now();
+  for (const [flowId, flow] of state.orderlyWalletFlows) {
+    if (!flow || flow.expiresAt <= nowMs) state.orderlyWalletFlows.delete(flowId);
+  }
+}
+
+async function orderlyPublicRequest(method, pathName, body, { baseUrl, query = {} }) {
+  const url = new URL(pathName, baseUrl);
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null && value !== "") {
+      url.searchParams.set(key, String(value));
+    }
+  }
+  const response = await fetch(url, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body)
+  });
+  const text = await response.text();
+  let payload = {};
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      payload = { message: text.slice(0, 300), nonJson: true };
+    }
+  }
+  if (!response.ok || payload.success === false || payload.nonJson) {
+    throw new ExchangeError(payload.message || `Orderly wallet onboarding failed with ${response.status}`, {
+      code: payload.code,
+      status: response.status,
+      path: url.pathname
+    });
+  }
+  return payload;
+}
+
+async function prepareOrderlyWalletOnboarding(body) {
+  if (state.exchangeId !== "mememax-orderly") {
+    throw new ExchangeError("Orderly wallet onboarding is only available for MemeMax Orderly");
+  }
+
+  const brokerId = mememaxBrokerId();
+  if (!brokerId) {
+    throw new ExchangeError("MEMEMAX_ORDERLY_BROKER_ID is required before wallet onboarding");
+  }
+
+  const userAddress = normalizeWalletAddress(body.userAddress || body.address);
+  const chainId = normalizeChainId(body.chainId);
+  const baseUrl = orderlyOnboardingBaseUrl();
+  const credentials = state.credentialsByExchange["mememax-orderly"] || {};
+  const existingKeyStatus = orderlyKeyStatus(credentials, userAddress);
+  if (existingKeyStatus.tradeReady) {
+    const nextMode = orderlyPersistedMode();
+    const envReport = updateSessionEnv({
+      SESSION_EXCHANGE_ID: "mememax-orderly",
+      TRADING_MODE: nextMode
+    });
+    state.exchangeId = "mememax-orderly";
+    state.mode = nextMode;
+    refreshMememaxOrderlyCredentials();
+    log("info", "Reused existing MemeMax Orderly key from session env", {
+      accountId: keyPreview(credentials.accountId),
+      orderlyKey: keyPreview(credentials.orderlyKey),
+      keyExpiresAt: existingKeyStatus.keyExpiresAt || "",
+      mode: state.mode,
+      file: envReport.file
+    });
+    return {
+      reused: true,
+      saved: true,
+      exchangeId: state.exchangeId,
+      mode: state.mode,
+      accountIdPreview: keyPreview(credentials.accountId),
+      orderlyKeyPreview: keyPreview(credentials.orderlyKey),
+      keyExpiresAt: existingKeyStatus.keyExpiresAt,
+      sessionEnvFile: ".env.session"
+    };
+  }
+  let accountId = "";
+  try {
+    const accountPayload = await orderlyPublicRequest("GET", "/v1/get_account", undefined, {
+      baseUrl,
+      query: {
+        address: userAddress,
+        broker_id: brokerId,
+        chain_type: "EVM"
+      }
+    });
+    accountId = String(accountPayload.data?.account_id || "").trim();
+  } catch (error) {
+    if (error.details?.status && error.details.status >= 500) throw error;
+  }
+
+  const { orderlyKey, orderlySecret } = generateOrderlyKeyPair();
+  const timestamp = Date.now();
+  const expirationDays = orderlyKeyExpirationDays();
+  const expiration = timestamp + Math.floor(expirationDays * 24 * 60 * 60 * 1000);
+  const scope = orderlyKeyScope();
+  let registrationMessage = null;
+  if (!accountId) {
+    const noncePayload = await orderlyPublicRequest("GET", "/v1/registration_nonce", undefined, { baseUrl });
+    const registrationNonce = String(noncePayload.data?.registration_nonce || "");
+    if (!registrationNonce) {
+      throw new ExchangeError("Orderly registration nonce response was missing registration_nonce");
+    }
+    registrationMessage = {
+      brokerId,
+      chainId,
+      timestamp,
+      registrationNonce
+    };
+  }
+  const addKeyMessage = {
+    brokerId,
+    chainId,
+    orderlyKey,
+    scope,
+    timestamp,
+    expiration
+  };
+  const flowId = crypto.randomUUID();
+  const expiresAt = timestamp + ORDERLY_WALLET_FLOW_TTL_MS;
+  pruneExpiredOrderlyWalletFlows();
+  state.orderlyWalletFlows.set(flowId, {
+    flowId,
+    baseUrl,
+    userAddress,
+    chainId,
+    accountId,
+    orderlyKey,
+    orderlySecret,
+    registrationMessage,
+    addKeyMessage,
+    expiresAt
+  });
+  return {
+    reused: false,
+    flowId,
+    baseUrl,
+    brokerId,
+    scope,
+    expiration,
+    expiresAt,
+    accountIdPreview: keyPreview(accountId),
+    orderlyKey,
+    orderlyKeyPreview: keyPreview(orderlyKey),
+    registrationTypedData: registrationMessage ? orderlyTypedData("Registration", chainId, registrationMessage) : null,
+    addKeyTypedData: orderlyTypedData("AddOrderlyKey", chainId, addKeyMessage)
+  };
+}
+
+async function completeOrderlyWalletOnboarding(body) {
+  const flowId = String(body.flowId || "").trim();
+  pruneExpiredOrderlyWalletFlows();
+  const flow = state.orderlyWalletFlows.get(flowId);
+  if (!flow) {
+    throw new ExchangeError("Orderly wallet onboarding flow expired; start again");
+  }
+
+  const userAddress = normalizeWalletAddress(body.userAddress || body.address);
+  if (userAddress.toLowerCase() !== flow.userAddress.toLowerCase()) {
+    throw new ExchangeError("Wallet address changed during Orderly onboarding");
+  }
+
+  const addKeySignature = normalizeSignature(body.addKeySignature, "Add Orderly Key");
+
+  let accountId = flow.accountId || "";
+  if (!accountId) {
+    const registrationSignature = normalizeSignature(body.registrationSignature, "Registration");
+    const registrationPayload = await orderlyPublicRequest("POST", "/v1/register_account", {
+      message: flow.registrationMessage,
+      signature: registrationSignature,
+      userAddress
+    }, { baseUrl: flow.baseUrl });
+    accountId = String(registrationPayload.data?.account_id || "").trim();
+  }
+  if (!accountId) {
+    throw new ExchangeError("Orderly registration response was missing account_id");
+  }
+
+  const addKeyPayload = await orderlyPublicRequest("POST", "/v1/orderly_key", {
+    message: flow.addKeyMessage,
+    signature: addKeySignature,
+    userAddress
+  }, { baseUrl: flow.baseUrl });
+  const confirmedOrderlyKey = String(addKeyPayload.data?.orderly_key || flow.orderlyKey).trim();
+  if (confirmedOrderlyKey && confirmedOrderlyKey !== flow.orderlyKey) {
+    throw new ExchangeError("Orderly returned a different key than the generated key");
+  }
+
+  const nextMode = orderlyPersistedMode();
+  const createdAt = String(flow.addKeyMessage.timestamp);
+  const expiresAt = String(flow.addKeyMessage.expiration);
+  const envReport = updateSessionEnv({
+    SESSION_EXCHANGE_ID: "mememax-orderly",
+    TRADING_MODE: nextMode,
+    MEMEMAX_ORDERLY_WALLET_ADDRESS: flow.userAddress,
+    MEMEMAX_ORDERLY_ACCOUNT_ID: accountId,
+    MEMEMAX_ORDERLY_KEY: flow.orderlyKey,
+    MEMEMAX_ORDERLY_SECRET: flow.orderlySecret,
+    MEMEMAX_ORDERLY_BROKER_ID: flow.addKeyMessage.brokerId,
+    MEMEMAX_ORDERLY_KEY_SCOPE: flow.addKeyMessage.scope,
+    MEMEMAX_ORDERLY_KEY_EXPIRATION_DAYS: String(orderlyKeyExpirationDays()),
+    MEMEMAX_ORDERLY_KEY_CREATED_AT: createdAt,
+    MEMEMAX_ORDERLY_KEY_EXPIRES_AT: expiresAt
+  });
+  state.exchangeId = "mememax-orderly";
+  state.mode = nextMode;
+  refreshMememaxOrderlyCredentials();
+  state.orderlyWalletFlows.delete(flowId);
+  log("info", "Orderly wallet onboarding saved to session env", {
+    accountId: keyPreview(accountId),
+    orderlyKey: keyPreview(flow.orderlyKey),
+    mode: state.mode,
+    file: envReport.file
+  });
+  return {
+    saved: true,
+    exchangeId: state.exchangeId,
+    mode: state.mode,
+    accountIdPreview: keyPreview(accountId),
+    orderlyKeyPreview: keyPreview(flow.orderlyKey),
+    keyCreatedAt: Number(createdAt),
+    keyExpiresAt: Number(expiresAt),
+    sessionEnvFile: ".env.session"
+  };
 }
 
 function mimeType(filePath) {
@@ -2216,6 +2695,21 @@ async function handleApi(req, res, pathname, searchParams) {
 
   if (req.method === "POST" && pathname === "/api/session") {
     throw new ExchangeError("Session is managed by .env.session. Edit the file and restart the server.");
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/wallet/orderly/config") {
+    json(res, 200, publicOrderlyWalletConfig());
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/wallet/orderly/prepare") {
+    json(res, 200, await prepareOrderlyWalletOnboarding(await readBody(req)));
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/wallet/orderly/complete") {
+    json(res, 200, await completeOrderlyWalletOnboarding(await readBody(req)));
     return;
   }
 

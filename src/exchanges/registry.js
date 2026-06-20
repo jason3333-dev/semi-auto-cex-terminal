@@ -1,4 +1,3 @@
-import { BinanceUsdmAdapter } from "./binance-usdm.js";
 import { MememaxOrderlyAdapter } from "./mememax-orderly.js";
 import { assertAdapterShape, ExchangeError } from "./types.js";
 
@@ -9,7 +8,6 @@ export function registerExchange(adapter) {
   registry.set(adapter.id, adapter);
 }
 
-registerExchange(new BinanceUsdmAdapter());
 registerExchange(new MememaxOrderlyAdapter());
 
 export function listExchanges() {

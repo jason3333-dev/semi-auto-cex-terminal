@@ -117,8 +117,11 @@ function loadTerminalApp() {
       chartLimit,
       renderJobs,
       renderOrders,
+      renderWalletStatus,
       runTradeAction,
       serverFailureMessage,
+      setupOrderlyWalletEnv,
+      syncWalletAccounts,
       updateActionControls
     };`
   );
@@ -196,6 +199,45 @@ test("order form defaults to auto chase with market wording", () => {
   assert.match(html, /id="takeProfitAmountInput" type="text"[^>]*placeholder="USDC or %"/);
   assert.match(html, />\s*MARKET\s*</);
   assert.doesNotMatch(html, />\s*FAST\s*</);
+});
+
+test("wallet connect controls are present and safe without browser wallet", async () => {
+  const html = fs.readFileSync(path.join(ROOT, "public", "index.html"), "utf8");
+  const { app, syncWalletAccounts, ui } = loadTerminalApp();
+
+  assert.match(html, /id="walletConnectButton"/);
+  assert.match(html, /id="walletOrderlyButton"/);
+  assert.match(html, /id="walletStatus"/);
+
+  await syncWalletAccounts();
+
+  assert.equal(app.wallet.available, false);
+  assert.equal(ui.walletConnectButton.disabled, true);
+  assert.equal(ui.walletOrderlyButton.disabled, true);
+  assert.equal(ui.walletStatus.textContent, "브라우저 지갑 없음");
+});
+
+test("MemeMax activation button exposes saved and expired key states", () => {
+  const { app, renderWalletStatus, ui } = loadTerminalApp();
+  app.session = {
+    walletOnboarding: {
+      orderly: { brokerIdConfigured: true, tradeReady: true, keyExpired: false }
+    }
+  };
+  app.wallet.available = true;
+  app.wallet.address = "0x1111111111111111111111111111111111111111";
+
+  renderWalletStatus();
+
+  assert.equal(ui.walletOrderlyButton.textContent, "MemeMax 활성");
+  assert.equal(ui.walletOrderlyButton.disabled, false);
+
+  app.session.walletOnboarding.orderly.tradeReady = false;
+  app.session.walletOnboarding.orderly.keyExpired = true;
+  renderWalletStatus();
+
+  assert.equal(ui.walletOrderlyButton.textContent, "키 갱신");
+  assert.match(ui.walletOrderlyButton.title, /API 키를 생성/);
 });
 
 test("chart defaults to 5 minute candles and keeps 15 second width available", () => {
